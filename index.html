@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>A股底部首板看板</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin: 36px 0 12px; border-left: 4px solid var(--accent); padding-left: 10px; }
+  .meta { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0 28px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 18px; min-width: 140px;
+  }
+  .stat .label { font-size: 12px; color: var(--dim); }
+  .stat .value { font-size: 20px; font-weight: 600; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th { color: var(--dim); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  td.note, th.note { white-space: normal; min-width: 260px; }
+  tr:hover td { background: #1c2129; }
+  .table-scroll {
+    overflow-x: auto; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel);
+  }
+  .empty { color: var(--dim); padding: 16px; font-size: 13.5px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  }
+  .badge.watching { background: #1f6feb33; color: var(--accent); }
+  .badge.buy_signal { background: #3fb95033; color: var(--green); }
+  .badge.expired { background: #8b949e33; color: var(--dim); }
+  select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; margin-bottom: 10px;
+  }
+  .pct-pos { color: var(--green); }
+  .pct-neg { color: var(--red); }
+  footer { color: var(--dim); font-size: 12px; margin-top: 48px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📈 A股底部首板看板</h1>
+  <div class="meta" id="meta"></div>
+
+  <div class="stat-row" id="stats"></div>
+
+  <h2>📊 板块热门度</h2>
+  <div id="board-table"></div>
+
+  <h2 id="new-heading">🆕 本次扫描新增</h2>
+  <div id="new-table"></div>
+
+  <h2>🎯 重点关注：回调至买点区间</h2>
+  <div id="buy-table"></div>
+
+  <h2>📋 完整信号记录</h2>
+  <select id="status-filter"></select>
+  <div id="all-table"></div>
+
+  <footer>纯决策辅助，不构成投资建议，买卖操作请自行判断。数据来源 AKShare，每日更新。</footer>
+</div>
+
+<script>
+const DATA = {"last_scan_at": "2026-09-01 22:22:58", "universe_count": "357 只（近7个交易日涨停股池：沪深主板+创业板） + 科创板全量", "board_ranking": [{"board": "橡胶制品", "pct_chg": 2.76, "leader_name": "科隆新材", "leader_pct_chg": 18.88, "group": null, "score": 2.76}, {"board": "军工装备", "pct_chg": 2.37, "leader_name": "晟楠科技", "leader_pct_chg": 29.96, "group": null, "score": 2.37}, {"board": "美容护理", "pct_chg": 1.74, "leader_name": "维琪科技", "leader_pct_chg": 29.98, "group": "医疗消费", "score": 1.74}, {"board": "非金属材料", "pct_chg": 0.58, "leader_name": "秉扬科技", "leader_pct_chg": 5.84, "group": "资源周期", "score": 1.08}, {"board": "军工电子", "pct_chg": 0.73, "leader_name": "成电光信", "leader_pct_chg": 12.05, "group": "科技芯片软件", "score": 0.73}, {"board": "电网设备", "pct_chg": 0.61, "leader_name": "益坤电气", "leader_pct_chg": 20.09, "group": "新能源光伏", "score": 0.61}, {"board": "金属新材料", "pct_chg": 0.06, "leader_name": "深圳新星", "leader_pct_chg": 10.02, "group": "资源周期", "score": 0.56}, {"board": "燃气", "pct_chg": 0.53, "leader_name": "贵州燃气", "leader_pct_chg": 9.95, "group": null, "score": 0.53}, {"board": "汽车零部件", "pct_chg": 0.49, "leader_name": "智新电子", "leader_pct_chg": 29.95, "group": null, "score": 0.49}, {"board": "建筑材料", "pct_chg": -0.03, "leader_name": "九鼎新材", "leader_pct_chg": 10.02, "group": "资源周期", "score": 0.47}, {"board": "旅游及酒店", "pct_chg": 0.44, "leader_name": "云南旅游", "leader_pct_chg": 10.06, "group": "医疗消费", "score": 0.44}, {"board": "厨卫电器", "pct_chg": 0.44, "leader_name": "万和电气", "leader_pct_chg": 3.15, "group": null, "score": 0.44}, {"board": "通用设备", "pct_chg": 0.34, "leader_name": "荣亿精密", "leader_pct_chg": 14.29, "group": null, "score": 0.34}, {"board": "白色家电", "pct_chg": 0.34, "leader_name": "万朗磁塑", "leader_pct_chg": 4.94, "group": null, "score": 0.34}, {"board": "消费电子", "pct_chg": 0.33, "leader_name": "奥尼电子", "leader_pct_chg": 10.67, "group": "科技芯片软件", "score": 0.33}, {"board": "包装印刷", "pct_chg": 0.2, "leader_name": "佳合科技", "leader_pct_chg": 5.41, "group": null, "score": 0.2}, {"board": "专用设备", "pct_chg": 0.17, "leader_name": "花溪科技", "leader_pct_chg": 14.78, "group": null, "score": 0.17}, {"board": "塑料制品", "pct_chg": 0.14, "leader_name": "道明光学", "leader_pct_chg": 10.02, "group": null, "score": 0.14}, {"board": "计算机设备", "pct_chg": 0.12, "leader_name": "曙光数创", "leader_pct_chg": 7.46, "group": "科技芯片软件", "score": 0.12}, {"board": "银行", "pct_chg": 0.06, "leader_name": "邮储银行", "leader_pct_chg": 1.28, "group": null, "score": 0.06}], "signals": [{"code": "000965", "name": "天保基建", "source": "bottom_reversal", "trigger_date": "2026-08-31", "trigger_price": 3.62, "post_high": 3.62, "status": "buy_signal", "note": "2026-09-01 较涨停后高点3.62回调5.0%，进入3%-7%买点区间", "board": "房地产开", "board_pct_chg": null, "added_at": "2026-08-31 21:35:08", "updated_at": "2026-09-01 22:22:43"}, {"code": "300413", "name": "芒果超媒", "source": "bottom_reversal", "trigger_date": "2026-08-31", "trigger_price": 16.98, "post_high": 20.38, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.94%，MA20前段变化-16.48%/近段-2.74%（钝化走平）", "board": "数字媒体", "board_pct_chg": null, "added_at": "2026-08-31 21:43:34", "updated_at": "2026-09-01 22:22:45"}, {"code": "601136", "name": "首创证券", "source": "bottom_reversal", "trigger_date": "2026-08-31", "trigger_price": 15.86, "post_high": 15.86, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.18%，MA20前段变化-6.25%/近段-0.96%（钝化走平）", "board": "证券Ⅱ", "board_pct_chg": null, "added_at": "2026-08-31 22:02:02", "updated_at": "2026-09-01 22:22:46"}, {"code": "601330", "name": "绿色动力", "source": "bottom_reversal", "trigger_date": "2026-08-31", "trigger_price": 7.81, "post_high": 7.97, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.38%，MA20前段变化-24.31%/近段-0.73%（钝化走平）", "board": "环境治理", "board_pct_chg": null, "added_at": "2026-08-31 22:02:07", "updated_at": "2026-09-01 22:22:48"}, {"code": "600551", "name": "时代出版", "source": "bottom_reversal", "trigger_date": "2026-08-28", "trigger_price": 7.5, "post_high": 9.08, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.34%，MA20前段变化-13.09%/近段0.9%（钝化走平）", "board": "出版", "board_pct_chg": null, "added_at": "2026-08-31 21:47:11", "updated_at": "2026-09-01 22:22:49"}, {"code": "600929", "name": "雪天盐业", "source": "bottom_reversal", "trigger_date": "2026-08-28", "trigger_price": 6.04, "post_high": 6.04, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.84%，MA20前段变化-14.26%/近段-0.4%（钝化走平）", "board": "化学原料", "board_pct_chg": null, "added_at": "2026-08-31 22:01:41", "updated_at": "2026-08-31 22:01:41"}, {"code": "603093", "name": "南华期货", "source": "bottom_reversal", "trigger_date": "2026-08-27", "trigger_price": 13.52, "post_high": 13.87, "status": "watching", "note": "底部首板：此前30个交易日无涨停，涨停价13.52未超过此前30日均价14.88", "board": "多元金融", "board_pct_chg": null, "added_at": "2026-09-01 22:05:10", "updated_at": "2026-09-01 22:22:52"}, {"code": "603237", "name": "五芳斋", "source": "bottom_reversal", "trigger_date": "2026-08-27", "trigger_price": 15.88, "post_high": 15.88, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.45%，MA20前段变化-11.61%/近段1.79%（钝化走平）", "board": "食品加工", "board_pct_chg": null, "added_at": "2026-08-31 22:41:12", "updated_at": "2026-09-01 22:22:53"}, {"code": "600479", "name": "千金药业", "source": "bottom_reversal", "trigger_date": "2026-08-26", "trigger_price": 11.02, "post_high": 13.37, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.97%，MA20前段变化-6.5%/近段1.02%（钝化走平）", "board": "中药Ⅱ", "board_pct_chg": null, "added_at": "2026-08-31 22:39:09", "updated_at": "2026-09-01 22:22:54"}, {"code": "003021", "name": "兆威机电", "source": "bottom_reversal", "trigger_date": "2026-08-25", "trigger_price": 72.78, "post_high": 75.1, "status": "watching", "note": "底部首板：此前30个交易日无涨停，涨停价72.78未超过此前30日均价77.69", "board": "电机Ⅱ", "board_pct_chg": null, "added_at": "2026-09-01 22:02:21", "updated_at": "2026-09-01 22:22:55"}, {"code": "003035", "name": "南网能源", "source": "bottom_reversal", "trigger_date": "2026-08-24", "trigger_price": 5.73, "post_high": 5.77, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.36%，MA20前段变化-35.89%/近段-0.26%（钝化走平）", "board": "电力", "board_pct_chg": null, "added_at": "2026-08-31 21:42:27", "updated_at": "2026-09-01 22:22:57"}, {"code": "600508", "name": "上海能源", "source": "bottom_reversal", "trigger_date": "2026-08-24", "trigger_price": 9.88, "post_high": 12.17, "status": "watching", "note": "地量涨停信号：涨停前地量换手0.52%，MA20前段变化-58.9%/近段1.45%（钝化走平）", "board": "煤炭开采", "board_pct_chg": null, "added_at": "2026-08-31 21:46:58", "updated_at": "2026-09-01 22:22:58"}, {"code": "603105", "name": "芯能科技", "source": "bottom_reversal", "trigger_date": "2026-08-24", "trigger_price": 7.74, "post_high": 8.08, "status": "buy_signal", "note": "2026-08-31 较涨停后高点8.08回调5.7%，进入3%-7%买点区间", "board": "电力", "board_pct_chg": null, "added_at": "2026-08-31 22:03:40", "updated_at": "2026-08-31 22:58:40"}], "generated_at": "2026-09-01 22:39:21"};
+const STATUS_LABEL = { watching: "观察中", buy_signal: "回调至买点区间", expired: "观察期结束" };
+
+function el(tag, attrs, children) {
+  const e = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === "class") e.className = attrs[k];
+    else if (k === "html") e.innerHTML = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  }
+  (children || []).forEach(c => e.appendChild(c));
+  return e;
+}
+function text(tag, s, attrs) { return el(tag, attrs, [document.createTextNode(s == null ? "" : s)]); }
+
+function renderTable(container, rows, columns) {
+  container.innerHTML = "";
+  if (!rows || rows.length === 0) {
+    container.appendChild(el("div", { class: "empty" }, [document.createTextNode("暂无数据。")]));
+    return;
+  }
+  const scroll = el("div", { class: "table-scroll" });
+  const table = el("table");
+  const thead = el("thead");
+  const headRow = el("tr");
+  columns.forEach(c => headRow.appendChild(text("th", c.label, c.cls ? { class: c.cls } : null)));
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  rows.forEach(row => {
+    const tr = el("tr");
+    columns.forEach(c => {
+      const val = c.render ? c.render(row) : (row[c.key] == null ? "" : row[c.key]);
+      if (val instanceof Node) {
+        tr.appendChild(el("td", c.cls ? { class: c.cls } : null, [val]));
+      } else {
+        tr.appendChild(text("td", val, c.cls ? { class: c.cls } : null));
+      }
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  scroll.appendChild(table);
+  container.appendChild(scroll);
+}
+
+function statusBadge(status) {
+  const span = el("span", { class: "badge " + status });
+  span.textContent = STATUS_LABEL[status] || status;
+  return span;
+}
+
+function pctCell(v) {
+  if (v == null || v === "") return "";
+  const n = Number(v);
+  const span = el("span", { class: n >= 0 ? "pct-pos" : "pct-neg" });
+  span.textContent = (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+  return span;
+}
+
+document.getElementById("meta").textContent =
+  "最后扫描时间：" + (DATA.last_scan_at || "无") + "　·　扫描范围：" + (DATA.universe_count || "无");
+
+const stats = document.getElementById("stats");
+[
+  ["累计信号总数", DATA.signals.length + " 条"],
+  ["观察中", DATA.signals.filter(s => s.status === "watching").length + " 只"],
+  ["买点区间", DATA.signals.filter(s => s.status === "buy_signal").length + " 只"],
+].forEach(([label, value]) => {
+  stats.appendChild(el("div", { class: "stat" }, [
+    el("div", { class: "label" }, [document.createTextNode(label)]),
+    el("div", { class: "value" }, [document.createTextNode(value)]),
+  ]));
+});
+
+renderTable(document.getElementById("board-table"), DATA.board_ranking, [
+  { key: "board", label: "板块" },
+  { label: "涨跌幅", render: r => pctCell(r.pct_chg) },
+  { key: "group", label: "关注分组" },
+  { key: "leader_name", label: "领涨股" },
+]);
+
+const scanDate = (DATA.last_scan_at || "").slice(0, 10);
+document.getElementById("new-heading").textContent = "🆕 本次扫描新增（" + scanDate + "）";
+const newSignals = DATA.signals.filter(s => (s.added_at || "").slice(0, 10) === scanDate);
+const signalColumns = [
+  { key: "code", label: "代码" },
+  { key: "name", label: "名称" },
+  { key: "board", label: "板块" },
+  { label: "首板日", key: "trigger_date" },
+  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
+  { label: "状态", render: r => statusBadge(r.status) },
+  { label: "备注", key: "note", cls: "note" },
+];
+renderTable(document.getElementById("new-table"), newSignals, signalColumns);
+
+const buySignals = DATA.signals.filter(s => s.status === "buy_signal");
+renderTable(document.getElementById("buy-table"), buySignals, [
+  { key: "code", label: "代码" },
+  { key: "name", label: "名称" },
+  { key: "board", label: "板块" },
+  { label: "首板日", key: "trigger_date" },
+  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
+  { label: "涨停后高点", render: r => r.post_high != null ? Number(r.post_high).toFixed(2) : "" },
+  { label: "备注", key: "note", cls: "note" },
+]);
+
+const filterSel = document.getElementById("status-filter");
+[["all", "全部"], ["watching", "观察中"], ["buy_signal", "买点区间"], ["expired", "观察期结束"]]
+  .forEach(([val, label]) => filterSel.appendChild(el("option", { value: val }, [document.createTextNode(label)])));
+function renderAll() {
+  const v = filterSel.value;
+  const rows = (v === "all" ? DATA.signals : DATA.signals.filter(s => s.status === v))
+    .slice().sort((a, b) => (b.trigger_date || "").localeCompare(a.trigger_date || ""));
+  renderTable(document.getElementById("all-table"), rows, signalColumns);
+}
+filterSel.addEventListener("change", renderAll);
+renderAll();
+</script>
+</body>
+</html>
