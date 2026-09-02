@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from astock_toolkit import db
+from astock_toolkit import config, db
 
 OUT_PATH = "index.html"
 
@@ -97,6 +97,7 @@ TEMPLATE = """<!doctype html>
   <div id="new-table"></div>
 
   <h2>🎯 重点关注：回调至买点区间</h2>
+  <div class="meta" id="macd-meta"></div>
   <div id="buy-table"></div>
 
   <h2>📋 完整信号记录</h2>
@@ -189,6 +190,15 @@ renderTable(document.getElementById("board-table"), DATA.board_ranking, [
   { key: "leader_name", label: "领涨股" },
 ]);
 
+document.getElementById("macd-meta").textContent =
+  "MACD确认：近" + DATA.macd_lookback_days + "个交易日内出现过金叉，且金叉后DIF-DEA持续向上发散——只是额外标注，不影响是否进入这个列表。";
+
+function macdCell(row) {
+  if (row.macd_confirmed === 1 || row.macd_confirmed === true) return "✅ 确认";
+  if (row.macd_confirmed === 0 || row.macd_confirmed === false) return "❌ 未确认";
+  return "－";
+}
+
 const scanDate = (DATA.last_scan_at || "").slice(0, 10);
 document.getElementById("new-heading").textContent = "🆕 本次扫描新增（" + scanDate + "）";
 const newSignals = DATA.signals.filter(s => (s.added_at || "").slice(0, 10) === scanDate);
@@ -199,6 +209,7 @@ const signalColumns = [
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
   { label: "状态", render: r => statusBadge(r.status) },
+  { label: "MACD确认", render: macdCell },
   { label: "备注", key: "note", cls: "note" },
 ];
 renderTable(document.getElementById("new-table"), newSignals, signalColumns);
@@ -211,6 +222,8 @@ renderTable(document.getElementById("buy-table"), buySignals, [
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
   { label: "涨停后高点", render: r => r.post_high != null ? Number(r.post_high).toFixed(2) : "" },
+  { label: "MACD确认", render: macdCell },
+  { label: "MACD说明", key: "macd_note", cls: "note" },
   { label: "备注", key: "note", cls: "note" },
 ]);
 
@@ -243,6 +256,7 @@ def build_data() -> dict:
         "board_ranking": board_ranking,
         "signals": signals,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "macd_lookback_days": config.MACD_CROSS_LOOKBACK_DAYS,
     }
 
 

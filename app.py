@@ -97,10 +97,16 @@ st.divider()
 st.subheader(
     f"🎯 重点关注：首板后回调至 {config.PULLBACK_MIN_PCT:.0f}%~{config.PULLBACK_MAX_PCT:.0f}% 买点区间"
 )
+st.caption(
+    f"MACD确认：近{config.MACD_CROSS_LOOKBACK_DAYS}个交易日内出现过金叉，"
+    "且金叉后DIF-DEA持续向上发散——只是额外标注，不影响是否进入这个列表。"
+)
 buy_signals = db.list_watchlist(status="buy_signal")
 if buy_signals:
     df = pd.DataFrame(buy_signals)
-    cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price", "post_high", "note"]
+    df["MACD确认"] = df["macd_confirmed"].map({1: "✅ 确认", 0: "❌ 未确认"}).fillna("－ 未计算")
+    cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price", "post_high",
+            "MACD确认", "macd_note", "note"]
     cols = [c for c in cols if c in df.columns]
     st.dataframe(df[cols], width="stretch", height=min(400, 60 + 35 * len(df)))
 else:
@@ -118,8 +124,9 @@ all_signals = db.list_watchlist(status=None if status_filter == "全部" else st
 if all_signals:
     df = pd.DataFrame(all_signals)
     df["状态"] = df["status"].map(STATUS_LABEL).fillna(df["status"])
+    df["MACD确认"] = df["macd_confirmed"].map({1: "✅", 0: "❌"}).fillna("－")
     cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price",
-            "post_high", "状态", "note", "added_at"]
+            "post_high", "状态", "MACD确认", "note", "added_at"]
     cols = [c for c in cols if c in df.columns]
     st.dataframe(df[cols].sort_values("trigger_date", ascending=False), width="stretch", height=500)
 else:

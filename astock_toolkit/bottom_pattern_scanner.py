@@ -2,9 +2,10 @@
 
 "底部首板"的定义（按最新说法，只有两条）：
   1. 此前30个交易日内没有涨停过（首板，排除连板/接力）。
-  2. 涨停当日收盘价，没有超过此前30个交易日的平均收盘价（判断是否处于底部；
-     不看地量、不看均线是否走平钝化）。
-  3. 重点关注：第一个涨停板后的5个交易日左右，回调5%左右的股票。
+  2. 涨停当日收盘价，没有超过此前30个交易日平均收盘价的 MA_PRICE_MAX_RATIO 倍
+     （判断是否处于底部；不看地量、不看均线是否走平钝化）。
+  3. 重点关注：第一个涨停板后的5个交易日左右，回调5%左右的股票——对这些股票额外
+     标注 MACD 是否确认（近30日内金叉，且金叉后 DIF-DEA 持续向上发散，见 macd.py）。
   4. 结合股票所属板块的热门度（由 daily_scan.py 在扫描时一并抓取）。
 
 范围：沪深主板 + 创业板 + 科创板，不含北交所（见 data_source.get_a_share_universe）。
@@ -12,7 +13,8 @@
 本模块提供：
   1. detect_bottom_reversal_signal —— 对单只股票最新一根K线做信号识别
   2. scan_universe_for_new_setups  —— 批量扫描一批股票，命中的自动写入观察池
-  3. refresh_pullback_signals      —— 检查观察池里的股票是否已到回调买点，或已过期
+  3. refresh_pullback_signals      —— 检查观察池里的股票是否已到回调买点、是否已过期，
+                                       并给进入买点区间的股票标注 MACD 确认情况
 
 本模块不含任何交互式按钮/人工触发逻辑——统一由 daily_scan.py 每天调用一次，
 app.py 只负责只读展示最近一次扫描的结果。
@@ -24,7 +26,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from . import config, data_source as ds, db
+from . import config, data_source as ds, db, macd
 
 
 def _get_history_with_cache(code: str, days: int = config.HISTORY_FETCH_DAYS) -> pd.DataFrame:
@@ -57,8 +59,9 @@ def detect_bottom_reversal_signal(hist: pd.DataFrame, code: str) -> dict | None:
       1. 最新一日涨停（按板块阈值：主板9.5%/创业科创19.5%，留误差空间）
       2. 是"第一个涨停板"：此前 FIRST_LIMIT_UP_LOOKBACK_DAYS 个交易日内没有出现过涨停
          （避免选到连板/接力，只要底部区域启动的首板）
-      3. 涨停当日收盘价，没有超过此前 MA_PRICE_WINDOW 个交易日的平均收盘价（用这一条
-         判断"底部"，不看地量、不看均线是否走平——按最新的定义简化掉了）
+      3. 涨停当日收盘价，没有超过此前 MA_PRICE_WINDOW 个交易日平均收盘价的
+         MA_PRICE_MAX_RATIO 倍（用这一条判断"底部"，不看地量、不看均线是否走平——
+         按最新的定义简化掉了）
     """
     df = hist.dropna(subset=["close"]).reset_index(drop=True)
     n = len(df)
@@ -81,14 +84,15 @@ def detect_bottom_reversal_signal(hist: pd.DataFrame, code: str) -> dict | None:
     if (prior_pct >= limit_up_pct).any():
         return None
 
-    # 2) 涨停当日收盘价不超过此前30个交易日的平均收盘价（用涨停之前的价格算均价，
-    #    不把当天这根涨停自己算进去，否则均价会被当天的涨幅拉高，条件失去意义）
+    # 2) 涨停当日收盘价不超过此前30个交易日平均收盘价的 MA_PRICE_MAX_RATIO 倍
+    #    （用涨停之前的价格算均价，不把当天这根涨停自己算进去，否则均价会被当天的
+    #    涨幅拉高，条件失去意义）
     price_window = pre.tail(config.MA_PRICE_WINDOW)["close"].dropna()
     if len(price_window) < config.MA_PRICE_WINDOW:
         return None
     avg_price = float(price_window.mean())
     trigger_close = float(today["close"])
-    if trigger_close > avg_price:
+    if trigger_close > avg_price * config.MA_PRICE_MAX_RATIO:
         return None
 
     return {
@@ -125,8 +129,8 @@ def scan_universe_for_new_setups(codes: list[dict], progress_cb=None) -> list[di
                         status="watching",
                         note=(
                             f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
-                            f"涨停价{sig['trigger_price']:.2f}未超过此前"
-                            f"{config.MA_PRICE_WINDOW}日均价{sig['avg_price_30d']:.2f}"
+                            f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
+                            f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
                         ),
                     )
                     found.append(sig)
@@ -178,8 +182,8 @@ def scan_recent_limit_up_pool(trading_days: int = 7, progress_cb=None) -> list[d
                             status="watching",
                             note=(
                                 f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
-                                f"涨停价{sig['trigger_price']:.2f}未超过此前"
-                                f"{config.MA_PRICE_WINDOW}日均价{sig['avg_price_30d']:.2f}"
+                                f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
+                                f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
                             ),
                         )
                         industry = row.get("industry")
@@ -223,8 +227,19 @@ def refresh_pullback_signals() -> list[dict]:
             note = (f"{latest['date']} 较涨停后高点{post_high:.2f}回调{pullback_pct:.1f}%，"
                     f"进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间")
             db.update_watchlist_status(code, trigger_date, "buy_signal", post_high=post_high, note=note)
+
+            # 进入买点区间的股票，额外标注一下 MACD 确认情况（近30日是否金叉+向上发散）。
+            # 只是标注，不影响这里已经判定的 buy_signal 状态本身。
+            try:
+                macd_result = macd.check_macd_confirmation(hist)
+            except Exception as e:  # noqa: BLE001
+                ds._record_error(e, f"check_macd_confirmation({code})")
+                macd_result = {"confirmed": False, "detail": "MACD计算出错"}
+            db.update_watchlist_macd(code, trigger_date, macd_result["confirmed"], macd_result["detail"])
+
             updates.append({**item, "status": "buy_signal", "pullback_pct": round(pullback_pct, 1),
-                             "post_high": post_high, "note": note})
+                             "post_high": post_high, "note": note,
+                             "macd_confirmed": macd_result["confirmed"], "macd_note": macd_result["detail"]})
         elif days_since > config.PULLBACK_WINDOW_DAYS:
             note = (f"涨停后已{days_since}个交易日，未出现"
                     f"{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%回调，观察期结束")

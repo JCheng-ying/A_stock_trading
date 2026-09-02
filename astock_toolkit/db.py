@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     note TEXT,
     board TEXT,             -- 所属热门板块名称（拿不到板块成分股数据时为空）
     board_pct_chg REAL,     -- 该板块当日涨跌幅（打分参考）
+    macd_confirmed INTEGER, -- 仅在 status='buy_signal' 时才会计算：1=近30日金叉且向上发散，0=没有，NULL=还没算过
+    macd_note TEXT,         -- MACD 判断的文字说明（金叉日期等）
     added_at TEXT,          -- 信号首次被扫描到并写入的时间（用于区分"哪一轮扫描新增的"）
     updated_at TEXT,
     PRIMARY KEY (code, trigger_date)
@@ -86,7 +88,8 @@ def init_db():
 def _migrate(conn):
     """兼容旧版数据库文件。每一步都是幂等的，重复运行不会出错。"""
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)")}
-    for col, coltype in (("board", "TEXT"), ("board_pct_chg", "REAL"), ("updated_at", "TEXT")):
+    for col, coltype in (("board", "TEXT"), ("board_pct_chg", "REAL"), ("updated_at", "TEXT"),
+                         ("macd_confirmed", "INTEGER"), ("macd_note", "TEXT")):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {coltype}")
     for old_table in ("holdings", "journal"):
@@ -101,9 +104,11 @@ def _migrate(conn):
         conn.execute(WATCHLIST_CREATE_SQL)
         conn.execute("""
             INSERT INTO watchlist (code, name, source, trigger_date, trigger_price, post_high,
-                                    status, note, board, board_pct_chg, added_at, updated_at)
+                                    status, note, board, board_pct_chg, macd_confirmed, macd_note,
+                                    added_at, updated_at)
             SELECT code, name, source, trigger_date, trigger_price, post_high,
-                   status, note, board, board_pct_chg, added_at, updated_at
+                   status, note, board, board_pct_chg, macd_confirmed, macd_note,
+                   added_at, updated_at
             FROM watchlist_old
         """)
         conn.execute("DROP TABLE watchlist_old")
@@ -174,6 +179,15 @@ def update_watchlist_board(code, trigger_date, board, board_pct_chg):
         conn.execute(
             "UPDATE watchlist SET board=?, board_pct_chg=? WHERE code=? AND trigger_date=?",
             (board, board_pct_chg, code, trigger_date),
+        )
+
+
+def update_watchlist_macd(code, trigger_date, confirmed, note):
+    """confirmed: True/False（存成 1/0），note: check_macd_confirmation() 里的 detail 文字。"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE watchlist SET macd_confirmed=?, macd_note=? WHERE code=? AND trigger_date=?",
+            (1 if confirmed else 0, note, code, trigger_date),
         )
 
 
