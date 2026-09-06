@@ -33,6 +33,27 @@ STATUS_LABEL = {
     "expired": "⌛ 观察期结束（未回调到位）",
 }
 
+
+def _color_pct(val):
+    """A股习惯：涨（+）用红色，跌（-）用绿色，跟欧美惯例相反。"""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0:
+        return "color: #f85149"
+    if v < 0:
+        return "color: #3fb950"
+    return ""
+
+
+def style_pct(df: pd.DataFrame, pct_columns: list[str]):
+    """给指定的涨跌幅列上色，其余列原样返回，供 st.dataframe() 直接展示。"""
+    cols_present = [c for c in pct_columns if c in df.columns]
+    if not cols_present:
+        return df
+    return df.style.map(_color_pct, subset=cols_present)
+
 st.title("📈 A股底部首板看板")
 
 last_scan_at = db.get_setting("last_scan_at")
@@ -67,7 +88,7 @@ if ranking_json:
     try:
         ranking_df = pd.read_json(io.StringIO(ranking_json))
         show_cols = [c for c in ["board", "pct_chg", "group", "score", "leader_name"] if c in ranking_df.columns]
-        st.dataframe(ranking_df[show_cols], width="stretch", height=280)
+        st.dataframe(style_pct(ranking_df[show_cols], ["pct_chg"]), width="stretch", height=280)
     except (ValueError, json.JSONDecodeError):
         st.caption("板块热度快照解析失败。")
 else:
@@ -85,7 +106,7 @@ if new_signals:
     df["状态"] = df["status"].map(STATUS_LABEL).fillna(df["status"])
     cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price", "状态", "note"]
     cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols], width="stretch", height=min(400, 60 + 35 * len(df)))
+    st.dataframe(style_pct(df[cols], ["board_pct_chg"]), width="stretch", height=min(400, 60 + 35 * len(df)))
 else:
     st.info("本次扫描没有新增的底部首板信号。")
 
@@ -108,7 +129,7 @@ if buy_signals:
     cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price", "post_high",
             "MACD确认", "macd_note", "note"]
     cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols], width="stretch", height=min(400, 60 + 35 * len(df)))
+    st.dataframe(style_pct(df[cols], ["board_pct_chg"]), width="stretch", height=min(400, 60 + 35 * len(df)))
 else:
     st.info("暂无股票处于回调买点区间。")
 
@@ -128,7 +149,8 @@ if all_signals:
     cols = ["code", "name", "board", "board_pct_chg", "trigger_date", "trigger_price",
             "post_high", "状态", "MACD确认", "note", "added_at"]
     cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols].sort_values("trigger_date", ascending=False), width="stretch", height=500)
+    df = df[cols].sort_values("trigger_date", ascending=False)
+    st.dataframe(style_pct(df, ["board_pct_chg"]), width="stretch", height=500)
 else:
     st.caption("信号池为空。")
 

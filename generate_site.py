@@ -78,8 +78,9 @@ TEMPLATE = """<!doctype html>
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 10px; font-size: 13px; margin-bottom: 10px;
   }
-  .pct-pos { color: var(--green); }
-  .pct-neg { color: var(--red); }
+  /* A股习惯：涨（+）用红色，跌（-）用绿色，跟欧美惯例相反 */
+  .pct-pos { color: var(--red); }
+  .pct-neg { color: var(--green); }
   footer { color: var(--dim); font-size: 12px; margin-top: 48px; }
 </style>
 </head>
@@ -210,6 +211,7 @@ const signalColumns = [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "board", label: "板块" },
+  { label: "板块涨跌幅", render: r => pctCell(r.board_pct_chg) },
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
   { label: "状态", render: r => statusBadge(r.status) },
@@ -223,6 +225,7 @@ renderTable(document.getElementById("buy-table"), buySignals, [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "board", label: "板块" },
+  { label: "板块涨跌幅", render: r => pctCell(r.board_pct_chg) },
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
   { label: "涨停后高点", render: r => r.post_high != null ? Number(r.post_high).toFixed(2) : "" },
