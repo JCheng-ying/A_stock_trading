@@ -212,8 +212,8 @@ def get_recent_limit_up_candidates(trading_days: int = 7, max_calendar_days_back
 def get_spot_snapshot() -> pd.DataFrame:
     """返回全市场实时快照（进程内短期缓存，见 _CACHE_TTL_SECONDS，避免同一分钟内重复拉取
     整张全市场快照）。统一列：code, name, price, pct_chg, open, prev_close, high, low,
-    volume, amount, turnover_rate(可能为空)。优先东方财富（含换手率），失败降级新浪
-    （无换手率，且分页拉取较慢）。
+    volume, amount, turnover_rate, market_cap(总市值，可能为空)。优先东方财富（含换手率、
+    总市值），失败降级新浪（无换手率、无总市值，且分页拉取较慢）。
     """
     return _cached("spot_snapshot", _get_spot_snapshot_uncached)
 
@@ -233,6 +233,7 @@ def _get_spot_snapshot_uncached() -> pd.DataFrame:
             "volume": df.get("成交量"),
             "amount": df.get("成交额"),
             "turnover_rate": df.get("换手率"),
+            "market_cap": df.get("总市值"),
         })
         return out
     except Exception as e:  # noqa: BLE001
@@ -252,6 +253,7 @@ def _get_spot_snapshot_uncached() -> pd.DataFrame:
             "volume": df.get("成交量"),
             "amount": df.get("成交额"),
             "turnover_rate": None,
+            "market_cap": None,
         })
         return out
     except Exception as e:  # noqa: BLE001

@@ -202,9 +202,12 @@ def scan_recent_limit_up_pool(trading_days: int = 7, progress_cb=None) -> list[d
 def refresh_pullback_signals() -> list[dict]:
     """检查观察池中 status='watching' 的股票：
 
-    - 若已从涨停后高点回调 PULLBACK_MIN_PCT~PULLBACK_MAX_PCT，标记为 'buy_signal'（买点区间）
-    - 若超过 PULLBACK_WINDOW_DAYS 个交易日仍未回调到位，标记为 'expired'（观察期结束）
-    - 否则更新 post_high 后继续保持 'watching'
+    - 若相对"涨停价位"本身回踩了 PULLBACK_MIN_PCT~PULLBACK_MAX_PCT，标记为 'buy_signal'
+      （买点区间）。注意"回踩"的基准是涨停当天的价位（trigger_price），不是后续如果
+      股票继续上涨创出的新高——比如涨停是90到100，回踩指的是回到93-97这个区间，
+      不是从后面涨出来的更高价位往下算回调。
+    - 若超过 PULLBACK_WINDOW_DAYS 个交易日仍未回踩到位，标记为 'expired'（观察期结束）
+    - 否则更新 post_high（仅作展示用的参考信息，不参与买点判断）后继续保持 'watching'
     """
     watching = db.list_watchlist(status="watching")
     updates = []
@@ -214,17 +217,18 @@ def refresh_pullback_signals() -> list[dict]:
         if hist.empty:
             continue
         trigger_date = item["trigger_date"]
+        trigger_price = float(item["trigger_price"])
         post = hist[hist["date"] > trigger_date]
         if post.empty:
             continue
 
-        post_high = max(float(item["post_high"] or item["trigger_price"]), float(post["close"].max()))
+        post_high = max(float(item["post_high"] or trigger_price), float(post["close"].max()))
         latest = post.iloc[-1]
         days_since = len(post)
-        pullback_pct = (post_high - float(latest["close"])) / post_high * 100 if post_high else 0.0
+        pullback_pct = (trigger_price - float(latest["close"])) / trigger_price * 100 if trigger_price else 0.0
 
         if config.PULLBACK_MIN_PCT <= pullback_pct <= config.PULLBACK_MAX_PCT:
-            note = (f"{latest['date']} 较涨停后高点{post_high:.2f}回调{pullback_pct:.1f}%，"
+            note = (f"{latest['date']} 较涨停价{trigger_price:.2f}回踩{pullback_pct:.1f}%，"
                     f"进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间")
             db.update_watchlist_status(code, trigger_date, "buy_signal", post_high=post_high, note=note)
 
@@ -247,5 +251,9 @@ def refresh_pullback_signals() -> list[dict]:
             updates.append({**item, "status": "expired", "pullback_pct": round(pullback_pct, 1),
                              "post_high": post_high, "note": note})
         else:
-            db.update_watchlist_status(code, trigger_date, "watching", post_high=post_high)
+            note = (f"{latest['date']} 较涨停价{trigger_price:.2f}"
+                    f"{'回踩' if pullback_pct >= 0 else '偏高'}{abs(pullback_pct):.1f}%，"
+                    f"未进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间"
+                    f"（涨停后第{days_since}个交易日）")
+            db.update_watchlist_status(code, trigger_date, "watching", post_high=post_high, note=note)
     return updates

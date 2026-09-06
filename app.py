@@ -131,3 +131,35 @@ if all_signals:
     st.dataframe(df[cols].sort_values("trigger_date", ascending=False), width="stretch", height=500)
 else:
     st.caption("信号池为空。")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# 第二个股票池：地量后放量突破（跟上面的底部首板完全独立，由 scan_volume_surge.py
+# 单独扫描/更新，不含在 daily_scan.py 里）
+# ---------------------------------------------------------------------------
+st.header("🔍 股票池二：地量后放量突破")
+st.caption(
+    f"条件：总市值 < {config.MARKET_CAP_MAX_YI}亿 + 此前{config.VOLUME_SURGE_LOOKBACK_DAYS}日平均换手率 < "
+    f"{config.VOLUME_SURGE_AVG_TURNOVER_MAX_PCT:.0f}% + 当日换手率 >= 前{config.VOLUME_SURGE_LOOKBACK_DAYS}日"
+    f"平均的{config.VOLUME_SURGE_RATIO:.0f}倍 + 当日收盘价 < 前{config.VOLUME_SURGE_LOOKBACK_DAYS}日均价的"
+    f"{config.VOLUME_SURGE_PRICE_MAX_RATIO:.1f}倍。不要求涨停。由 `python scan_volume_surge.py` 单独扫描"
+    "（比底部首板慢很多，不用每天跟着一起跑）。"
+)
+vs_last_scan_at = db.get_setting("last_volume_surge_scan_at")
+vs_universe_count = db.get_setting("last_volume_surge_universe_count")
+if not vs_last_scan_at:
+    st.info("还没跑过这个股票池的扫描。终端里运行 `python scan_volume_surge.py`（建议先加 `--limit 300` 测试）。")
+else:
+    vs_cols = st.columns(2)
+    vs_cols[0].metric("最后扫描时间", vs_last_scan_at)
+    vs_cols[1].metric("扫描范围", vs_universe_count or "?")
+    vs_signals = db.list_volume_surge()
+    if vs_signals:
+        vs_df = pd.DataFrame(vs_signals)
+        cols = ["code", "name", "trigger_date", "trigger_price", "avg_turnover_30d",
+                "today_turnover", "avg_price_30d", "note"]
+        cols = [c for c in cols if c in vs_df.columns]
+        st.dataframe(vs_df[cols], width="stretch", height=min(450, 60 + 35 * len(vs_df)))
+    else:
+        st.caption("暂无命中的股票。")

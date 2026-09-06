@@ -104,6 +104,10 @@ TEMPLATE = """<!doctype html>
   <select id="status-filter"></select>
   <div id="all-table"></div>
 
+  <h1 style="margin-top:56px">🔍 股票池二：地量后放量突破</h1>
+  <div class="meta" id="vs-meta"></div>
+  <div id="vs-table"></div>
+
   <footer>纯决策辅助，不构成投资建议，买卖操作请自行判断。数据来源 AKShare，每日更新。</footer>
 </div>
 
@@ -238,6 +242,20 @@ function renderAll() {
 }
 filterSel.addEventListener("change", renderAll);
 renderAll();
+
+document.getElementById("vs-meta").textContent = DATA.vs_last_scan_at
+  ? "最后扫描时间：" + DATA.vs_last_scan_at + "　·　扫描范围：" + (DATA.vs_universe_count || "无")
+  : "还没跑过这个股票池的扫描（python scan_volume_surge.py）。";
+renderTable(document.getElementById("vs-table"), DATA.volume_surge_signals, [
+  { key: "code", label: "代码" },
+  { key: "name", label: "名称" },
+  { key: "trigger_date", label: "触发日" },
+  { label: "触发价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
+  { label: "前30日均换手", render: r => r.avg_turnover_30d != null ? Number(r.avg_turnover_30d).toFixed(2) + "%" : "" },
+  { label: "当日换手", render: r => r.today_turnover != null ? Number(r.today_turnover).toFixed(2) + "%" : "" },
+  { label: "前30日均价", render: r => r.avg_price_30d != null ? Number(r.avg_price_30d).toFixed(2) : "" },
+  { label: "备注", key: "note", cls: "note" },
+]);
 </script>
 </body>
 </html>
@@ -257,6 +275,9 @@ def build_data() -> dict:
         "signals": signals,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "macd_lookback_days": config.MACD_CROSS_LOOKBACK_DAYS,
+        "vs_last_scan_at": db.get_setting("last_volume_surge_scan_at") or "",
+        "vs_universe_count": db.get_setting("last_volume_surge_universe_count") or "",
+        "volume_surge_signals": db.list_volume_surge(),
     }
 
 

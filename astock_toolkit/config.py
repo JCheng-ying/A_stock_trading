@@ -87,4 +87,20 @@ HISTORY_FETCH_DAYS = 320           # 每次拉取历史K线的天数（留足缓
 # ---------------------------------------------------------------------------
 TOP_BOARDS_FOR_HEAT_TAGGING = 20
 
+# ---------------------------------------------------------------------------
+# 6. 第二个股票池："地量后放量突破"（跟"底部首板"完全独立，不要求涨停）。
+#    条件（同时满足，"当日"以运行扫描那一刻能拿到的最新交易日为准）：
+#      1. 总市值 < MARKET_CAP_MAX_YI 亿人民币；
+#      2. 此前 VOLUME_SURGE_LOOKBACK_DAYS 个交易日平均换手率 < VOLUME_SURGE_AVG_TURNOVER_MAX_PCT；
+#      3. 当日换手率 >= 前30日平均换手率的 VOLUME_SURGE_RATIO 倍；
+#      4. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍。
+#    市值过滤依赖东方财富实时快照的总市值字段，该字段没有新浪备用数据源——如果东方
+#    财富当天连不上，这个股票池会跳过市值过滤这一步（scan_volume_surge.py 里会提示）。
+# ---------------------------------------------------------------------------
+MARKET_CAP_MAX_YI = 200                    # 总市值上限（亿元）
+VOLUME_SURGE_LOOKBACK_DAYS = 30            # 平均换手率/平均价格的回看窗口
+VOLUME_SURGE_AVG_TURNOVER_MAX_PCT = 2.0    # 前30日平均换手率上限（%），越低说明越"地量"
+VOLUME_SURGE_RATIO = 2.0                   # 当日换手率至少是前30日平均的这个倍数
+VOLUME_SURGE_PRICE_MAX_RATIO = 1.2         # 当日收盘价不超过前30日均价的这个倍数
+
 DB_PATH = "data/astock_toolkit.sqlite3"

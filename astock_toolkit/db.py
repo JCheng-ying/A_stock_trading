@@ -40,7 +40,22 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 """
 
-SCHEMA = WATCHLIST_CREATE_SQL + """
+VOLUME_SURGE_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS volume_surge_pool (
+    code TEXT,
+    name TEXT,
+    trigger_date TEXT,        -- 命中"地量后放量"条件的那个交易日
+    trigger_price REAL,       -- 当日收盘价
+    avg_turnover_30d REAL,    -- 此前30日平均换手率(%)
+    today_turnover REAL,      -- 当日换手率(%)
+    avg_price_30d REAL,       -- 此前30日平均收盘价
+    note TEXT,
+    added_at TEXT,
+    PRIMARY KEY (code, trigger_date)
+);
+"""
+
+SCHEMA = WATCHLIST_CREATE_SQL + VOLUME_SURGE_CREATE_SQL + """
 CREATE TABLE IF NOT EXISTS price_cache (
     code TEXT,
     date TEXT,
@@ -211,6 +226,51 @@ def list_watchlist_added_on(date_str: str):
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM watchlist WHERE substr(added_at, 1, 10) = ? ORDER BY trigger_date DESC, code",
+            (date_str,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# volume_surge_pool（第二个股票池："地量后放量突破"，跟 watchlist 完全独立）
+# ---------------------------------------------------------------------------
+
+def upsert_volume_surge(code, name, trigger_date, trigger_price, avg_turnover_30d,
+                         today_turnover, avg_price_30d, note=""):
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT code FROM volume_surge_pool WHERE code=? AND trigger_date=?", (code, trigger_date)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE volume_surge_pool SET name=?, trigger_price=?, avg_turnover_30d=?, "
+                "today_turnover=?, avg_price_30d=?, note=? WHERE code=? AND trigger_date=?",
+                (name, trigger_price, avg_turnover_30d, today_turnover, avg_price_30d, note,
+                 code, trigger_date),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO volume_surge_pool (code, name, trigger_date, trigger_price, "
+                "avg_turnover_30d, today_turnover, avg_price_30d, note, added_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (code, name, trigger_date, trigger_price, avg_turnover_30d, today_turnover,
+                 avg_price_30d, note, now_str()),
+            )
+
+
+def list_volume_surge():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM volume_surge_pool ORDER BY trigger_date DESC, code"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_volume_surge_added_on(date_str: str):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM volume_surge_pool WHERE substr(added_at, 1, 10) = ? "
+            "ORDER BY trigger_date DESC, code",
             (date_str,),
         ).fetchall()
         return [dict(r) for r in rows]
