@@ -84,8 +84,14 @@ def _ensure_dir():
 
 @contextmanager
 def get_conn():
+    """每次调用开一个新连接（不跨线程共享 sqlite3.Connection 对象，这样天然线程安全）。
+    scan_volume_surge.py / daily_scan.py 用线程池并发拉取历史行情时，多个线程会同时
+    写 price_cache——timeout=30 让某个线程写入时如果暂时锁住了，其它线程等一等而不是
+    立刻报 "database is locked"；WAL 模式进一步减少读写互相阻塞。
+    """
     _ensure_dir()
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     try:
         yield conn

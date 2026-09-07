@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from . import config, data_source as ds, db, macd
+from . import concurrency, config, data_source as ds, db, macd
 
 
 def _get_history_with_cache(code: str, days: int = config.HISTORY_FETCH_DAYS) -> pd.DataFrame:
@@ -103,46 +103,91 @@ def detect_bottom_reversal_signal(hist: pd.DataFrame, code: str) -> dict | None:
     }
 
 
-def scan_universe_for_new_setups(codes: list[dict], progress_cb=None) -> list[dict]:
+def _scan_one_new_setup(item: dict) -> dict | None:
+    """必须是模块顶层函数（不能是闭包）——多进程要靠 pickle 把它传给子进程。"""
+    code, name = item["code"], item["name"]
+    try:
+        hist = _get_history_with_cache(code)
+        if hist.empty:
+            return None
+        sig = detect_bottom_reversal_signal(hist, code)
+        if not sig:
+            return None
+        sig["name"] = name
+        db.upsert_watchlist(
+            code=code,
+            name=name,
+            source="bottom_reversal",
+            trigger_date=sig["trigger_date"],
+            trigger_price=sig["trigger_price"],
+            post_high=sig["trigger_price"],
+            status="watching",
+            note=(
+                f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
+                f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
+                f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
+            ),
+        )
+        return sig
+    except Exception as e:  # noqa: BLE001
+        ds._record_error(e, f"scan_universe({code})")
+        return None
+
+
+def scan_universe_for_new_setups(codes: list[dict], progress_cb=None, max_workers: int = 8) -> list[dict]:
     """批量扫描，codes: [{code, name}, ...]。命中的股票自动 upsert 进观察池。
 
     注意：全市场（约5000只）逐只拉历史行情较慢（受限于数据源限速），建议先用较小的
     候选池（如沪深300/中证500/自选池）做日常扫描，全市场扫描适合收盘后跑一次。
+    max_workers>1 用多进程并发拉历史行情（瓶颈在网络I/O，不是CPU；用多进程而不是
+    多线程见 concurrency.py 顶部注释——新浪历史行情降级路径内部的V8引擎不是线程
+    安全的，多线程并发会直接把整个进程崩掉）。
     """
-    found = []
-    total = len(codes)
-    for i, item in enumerate(codes):
-        code, name = item["code"], item["name"]
-        try:
-            hist = _get_history_with_cache(code)
-            if not hist.empty:
-                sig = detect_bottom_reversal_signal(hist, code)
-                if sig:
-                    sig["name"] = name
-                    db.upsert_watchlist(
-                        code=code,
-                        name=name,
-                        source="bottom_reversal",
-                        trigger_date=sig["trigger_date"],
-                        trigger_price=sig["trigger_price"],
-                        post_high=sig["trigger_price"],
-                        status="watching",
-                        note=(
-                            f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
-                            f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
-                            f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
-                        ),
-                    )
-                    found.append(sig)
-        except Exception as e:  # noqa: BLE001
-            ds._record_error(e, f"scan_universe({code})")
-        finally:
-            if progress_cb:
-                progress_cb(i + 1, total)
-    return found
+    return concurrency.run_concurrent(codes, _scan_one_new_setup, max_workers=max_workers, progress_cb=progress_cb)
 
 
-def scan_recent_limit_up_pool(trading_days: int = 7, progress_cb=None) -> list[dict]:
+def _scan_one_recent_limit_up(group_item) -> dict | None:
+    """必须是模块顶层函数（不能是闭包）——多进程要靠 pickle 把它传给子进程。
+    group_item: (code, group_df)，group_df 是该代码在窗口内所有涨停记录。
+    """
+    code, group = group_item
+    name = group["name"].iloc[0]
+    try:
+        hist = _get_history_with_cache(code)
+        if hist.empty:
+            return None
+        for _, row in group.sort_values("trigger_date").iterrows():
+            truncated = hist[hist["date"] <= row["trigger_date"]]
+            if truncated.empty:
+                continue
+            sig = detect_bottom_reversal_signal(truncated, code)
+            if sig:
+                sig["name"] = name
+                db.upsert_watchlist(
+                    code=code,
+                    name=name,
+                    source="bottom_reversal",
+                    trigger_date=sig["trigger_date"],
+                    trigger_price=sig["trigger_price"],
+                    post_high=sig["trigger_price"],
+                    status="watching",
+                    note=(
+                        f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
+                        f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
+                        f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
+                    ),
+                )
+                industry = row.get("industry")
+                if industry:
+                    db.update_watchlist_board(code, sig["trigger_date"], industry, None)
+                return sig  # 该代码在窗口内命中一次首板即可，不用再测它后续的连板日
+        return None
+    except Exception as e:  # noqa: BLE001
+        ds._record_error(e, f"scan_recent_limit_up_pool({code})")
+        return None
+
+
+def scan_recent_limit_up_pool(trading_days: int = 7, progress_cb=None, max_workers: int = 8) -> list[dict]:
     """快速方案（默认用这个）：先用 data_source.get_recent_limit_up_candidates 拿到
     "近N个交易日涨停过的股票"这个很小的候选名单（东方财富涨停股池接口直接给，不用
     自己逐只拉历史去判断涨没涨停），再只对这一小撮候选股做完整的首板/地量/钝化/
@@ -151,109 +196,84 @@ def scan_recent_limit_up_pool(trading_days: int = 7, progress_cb=None) -> list[d
     注意：涨停股池接口本身不含 ST 和科创板股票（东方财富的限制，非本工具限制）。
     如果某只股票在窗口内涨停了不止一次（连板），会对它在窗口内的每个涨停日分别校验，
     命中即为真正的"首板日"（更早的涨停会被 detect_bottom_reversal_signal 里的
-    "首板"校验自然排除，不需要在这里手工去重）。
+    "首板"校验自然排除，不需要在这里手工去重）。max_workers>1 用多进程并发拉历史行情。
     """
     pool = ds.get_recent_limit_up_candidates(trading_days=trading_days)
     if pool.empty:
         return []
 
-    found = []
     grouped = list(pool.groupby("code"))
-    total = len(grouped)
-    for i, (code, group) in enumerate(grouped):
-        name = group["name"].iloc[0]
+    return concurrency.run_concurrent(grouped, _scan_one_recent_limit_up, max_workers=max_workers,
+                                       progress_cb=progress_cb)
+
+
+def _refresh_one_pullback(item: dict) -> dict | None:
+    """必须是模块顶层函数（不能是闭包）——多进程要靠 pickle 把它传给子进程。
+
+    "回踩"的基准是涨停当天的价位（trigger_price），不是后续如果股票继续上涨创出的
+    新高——比如涨停是90到100，回踩指的是回到93-97这个区间，不是从后面涨出来的更高
+    价位往下算回调。只有真正状态发生转换（进入买点区间/观察期结束）才返回结果给
+    调用方汇总打印，"继续观察中"这种情况仍然会更新数据库（刷新备注），但不计入返回值
+    （跟原来顺序执行版本的行为保持一致）。
+    """
+    code = item["code"]
+    hist = _get_history_with_cache(code)
+    if hist.empty:
+        return None
+    trigger_date = item["trigger_date"]
+    trigger_price = float(item["trigger_price"])
+    post = hist[hist["date"] > trigger_date]
+    if post.empty:
+        return None
+
+    post_high = max(float(item["post_high"] or trigger_price), float(post["close"].max()))
+    latest = post.iloc[-1]
+    days_since = len(post)
+    pullback_pct = (trigger_price - float(latest["close"])) / trigger_price * 100 if trigger_price else 0.0
+
+    if config.PULLBACK_MIN_PCT <= pullback_pct <= config.PULLBACK_MAX_PCT:
+        note = (f"{latest['date']} 较涨停价{trigger_price:.2f}回踩{pullback_pct:.1f}%，"
+                f"进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间")
+        db.update_watchlist_status(code, trigger_date, "buy_signal", post_high=post_high, note=note)
+
+        # 进入买点区间的股票，额外标注一下 MACD 确认情况（近30日是否金叉+向上发散）。
+        # 只是标注，不影响这里已经判定的 buy_signal 状态本身。
         try:
-            hist = _get_history_with_cache(code)
-            if not hist.empty:
-                for _, row in group.sort_values("trigger_date").iterrows():
-                    truncated = hist[hist["date"] <= row["trigger_date"]]
-                    if truncated.empty:
-                        continue
-                    sig = detect_bottom_reversal_signal(truncated, code)
-                    if sig:
-                        sig["name"] = name
-                        db.upsert_watchlist(
-                            code=code,
-                            name=name,
-                            source="bottom_reversal",
-                            trigger_date=sig["trigger_date"],
-                            trigger_price=sig["trigger_price"],
-                            post_high=sig["trigger_price"],
-                            status="watching",
-                            note=(
-                                f"底部首板：此前{config.FIRST_LIMIT_UP_LOOKBACK_DAYS}个交易日无涨停，"
-                                f"涨停价{sig['trigger_price']:.2f}未超过此前{config.MA_PRICE_WINDOW}日"
-                                f"均价{sig['avg_price_30d']:.2f}的{config.MA_PRICE_MAX_RATIO:.1f}倍"
-                            ),
-                        )
-                        industry = row.get("industry")
-                        if industry:
-                            db.update_watchlist_board(code, sig["trigger_date"], industry, None)
-                        found.append(sig)
-                        break  # 该代码在窗口内命中一次首板即可，不用再测它后续的连板日
+            macd_result = macd.check_macd_confirmation(hist)
         except Exception as e:  # noqa: BLE001
-            ds._record_error(e, f"scan_recent_limit_up_pool({code})")
-        finally:
-            if progress_cb:
-                progress_cb(i + 1, total)
-    return found
+            ds._record_error(e, f"check_macd_confirmation({code})")
+            macd_result = {"confirmed": False, "detail": "MACD计算出错"}
+        db.update_watchlist_macd(code, trigger_date, macd_result["confirmed"], macd_result["detail"])
+
+        return {**item, "status": "buy_signal", "pullback_pct": round(pullback_pct, 1),
+                "post_high": post_high, "note": note,
+                "macd_confirmed": macd_result["confirmed"], "macd_note": macd_result["detail"]}
+    elif days_since > config.PULLBACK_WINDOW_DAYS:
+        note = (f"涨停后已{days_since}个交易日，未出现"
+                f"{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%回调，观察期结束")
+        db.update_watchlist_status(code, trigger_date, "expired", post_high=post_high, note=note)
+        return {**item, "status": "expired", "pullback_pct": round(pullback_pct, 1),
+                "post_high": post_high, "note": note}
+    else:
+        note = (f"{latest['date']} 较涨停价{trigger_price:.2f}"
+                f"{'回踩' if pullback_pct >= 0 else '偏高'}{abs(pullback_pct):.1f}%，"
+                f"未进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间"
+                f"（涨停后第{days_since}个交易日）")
+        db.update_watchlist_status(code, trigger_date, "watching", post_high=post_high, note=note)
+        return None
 
 
-def refresh_pullback_signals() -> list[dict]:
+def refresh_pullback_signals(max_workers: int = 8) -> list[dict]:
     """检查观察池中 status='watching' 的股票：
 
     - 若相对"涨停价位"本身回踩了 PULLBACK_MIN_PCT~PULLBACK_MAX_PCT，标记为 'buy_signal'
-      （买点区间）。注意"回踩"的基准是涨停当天的价位（trigger_price），不是后续如果
-      股票继续上涨创出的新高——比如涨停是90到100，回踩指的是回到93-97这个区间，
-      不是从后面涨出来的更高价位往下算回调。
+      （买点区间）。
     - 若超过 PULLBACK_WINDOW_DAYS 个交易日仍未回踩到位，标记为 'expired'（观察期结束）
-    - 否则更新 post_high（仅作展示用的参考信息，不参与买点判断）后继续保持 'watching'
+    - 否则更新 post_high 和备注（仅作展示用的参考信息，不参与买点判断）后继续保持
+      'watching'
+
+    max_workers>1 用多进程并发拉历史行情（原因见 concurrency.py 顶部注释：新浪历史
+    行情降级路径用了不是线程安全的V8引擎，只能用多进程不能用多线程）。
     """
     watching = db.list_watchlist(status="watching")
-    updates = []
-    for item in watching:
-        code = item["code"]
-        hist = _get_history_with_cache(code)
-        if hist.empty:
-            continue
-        trigger_date = item["trigger_date"]
-        trigger_price = float(item["trigger_price"])
-        post = hist[hist["date"] > trigger_date]
-        if post.empty:
-            continue
-
-        post_high = max(float(item["post_high"] or trigger_price), float(post["close"].max()))
-        latest = post.iloc[-1]
-        days_since = len(post)
-        pullback_pct = (trigger_price - float(latest["close"])) / trigger_price * 100 if trigger_price else 0.0
-
-        if config.PULLBACK_MIN_PCT <= pullback_pct <= config.PULLBACK_MAX_PCT:
-            note = (f"{latest['date']} 较涨停价{trigger_price:.2f}回踩{pullback_pct:.1f}%，"
-                    f"进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间")
-            db.update_watchlist_status(code, trigger_date, "buy_signal", post_high=post_high, note=note)
-
-            # 进入买点区间的股票，额外标注一下 MACD 确认情况（近30日是否金叉+向上发散）。
-            # 只是标注，不影响这里已经判定的 buy_signal 状态本身。
-            try:
-                macd_result = macd.check_macd_confirmation(hist)
-            except Exception as e:  # noqa: BLE001
-                ds._record_error(e, f"check_macd_confirmation({code})")
-                macd_result = {"confirmed": False, "detail": "MACD计算出错"}
-            db.update_watchlist_macd(code, trigger_date, macd_result["confirmed"], macd_result["detail"])
-
-            updates.append({**item, "status": "buy_signal", "pullback_pct": round(pullback_pct, 1),
-                             "post_high": post_high, "note": note,
-                             "macd_confirmed": macd_result["confirmed"], "macd_note": macd_result["detail"]})
-        elif days_since > config.PULLBACK_WINDOW_DAYS:
-            note = (f"涨停后已{days_since}个交易日，未出现"
-                    f"{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%回调，观察期结束")
-            db.update_watchlist_status(code, trigger_date, "expired", post_high=post_high, note=note)
-            updates.append({**item, "status": "expired", "pullback_pct": round(pullback_pct, 1),
-                             "post_high": post_high, "note": note})
-        else:
-            note = (f"{latest['date']} 较涨停价{trigger_price:.2f}"
-                    f"{'回踩' if pullback_pct >= 0 else '偏高'}{abs(pullback_pct):.1f}%，"
-                    f"未进入{config.PULLBACK_MIN_PCT:.0f}%-{config.PULLBACK_MAX_PCT:.0f}%买点区间"
-                    f"（涨停后第{days_since}个交易日）")
-            db.update_watchlist_status(code, trigger_date, "watching", post_high=post_high, note=note)
-    return updates
+    return concurrency.run_concurrent(watching, _refresh_one_pullback, max_workers=max_workers)

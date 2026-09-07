@@ -9,9 +9,13 @@
 每只都要拉一遍历史行情算30日平均），比 daily_scan.py 的"涨停股池快速方案"慢得多，
 建议单独找时间跑（比如周末跑一次），不用每天跟着 daily_scan.py 一起跑。
 
+市值过滤：东方财富快照能连上时会实时过滤 + 顺带缓存一份到本地；连不上时自动退回
+上一次成功缓存的市值快照（哪怕缓存有几天旧了，也比完全不限市值扫全市场强）。
+
 用法：
     python scan_volume_surge.py                # 全量扫描（市值<200亿的股票，可能要跑很久）
     python scan_volume_surge.py --limit 300     # 先测试
+    python scan_volume_surge.py --workers 16    # 调整并发进程数（默认8，网络容易超时可以调低）
 """
 
 from __future__ import annotations
@@ -32,23 +36,28 @@ except (AttributeError, ValueError):
 def main():
     parser = argparse.ArgumentParser(description="地量后放量突破 扫描")
     parser.add_argument("--limit", type=int, default=None, help="只扫描前N只（测试用）")
+    parser.add_argument("--workers", type=int, default=8, help="并发扫描的进程数（默认8）")
     args = parser.parse_args()
 
     db.init_db()
     t0 = time.time()
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取市值 < {config.MARKET_CAP_MAX_YI}亿的选股范围...")
-    universe, cap_filter_applied = vss.get_market_cap_filtered_universe()
+    universe, cap_filter_applied, cap_source = vss.get_market_cap_filtered_universe()
     if universe.empty:
         print("❌ 未能获取股票代码列表，请检查网络后重试。最近内部错误：", ds.LAST_ERROR)
         sys.exit(1)
     if not cap_filter_applied:
-        print("⚠️  东方财富实时快照当前不可用，无法按总市值过滤——本次扫描范围是"
-              "沪深主板+创业板+科创板全市场（不含北交所/ST），不限市值，会比预期慢很多。")
+        print("⚠️  东方财富实时快照当前不可用，也没有历史缓存可用——无法按总市值过滤，"
+              "本次扫描范围是沪深主板+创业板+科创板全市场（不含北交所/ST），会比预期慢很多。")
+    elif cap_source == "live":
+        print("    市值数据来自本次实时快照（已顺带缓存，供以后东方财富连不上时使用）。")
+    else:
+        print(f"    ⚠️ 东方财富本次连不上，市值数据用的是上次缓存（缓存时间：{cap_source}）。")
     codes = universe.to_dict("records")
     if args.limit:
         codes = codes[: args.limit]
-    print(f"    范围内共 {len(universe)} 只，本次扫描 {len(codes)} 只。")
+    print(f"    范围内共 {len(universe)} 只，本次扫描 {len(codes)} 只（并发 {args.workers} 进程）。")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描地量后放量信号（逐只拉取历史行情，请耐心等待）...")
 
@@ -56,7 +65,7 @@ def main():
         if i % 50 == 0 or i == total:
             print(f"    进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
 
-    found = vss.scan_volume_surge(codes, progress_cb=_progress)
+    found = vss.scan_volume_surge(codes, progress_cb=_progress, max_workers=args.workers)
     print(f"    本次命中 {len(found)} 只。")
 
     db.set_setting("last_volume_surge_scan_at", db.now_str())

@@ -16,6 +16,7 @@
     python daily_scan.py --skip-star-market       # 跳过科创板部分，只用涨停股池那一小步（更快）
     python daily_scan.py --full-universe         # 旧方案：全市场逐只扫描（很慢，收盘后跑）
     python daily_scan.py --full-universe --limit 300   # 全市场方案的小范围测试
+    python daily_scan.py --workers 16                   # 调整并发进程数（默认8）
 
 建议：
     - 收盘后（15:30之后）运行，当天行情已经走完，扫描结果更稳定。
@@ -69,7 +70,7 @@ def _tag_board_heat(context: str):
         print(f"    板块热门度标注过程出错（不影响已保存的信号结果）：{e!r}")
 
 
-def run_fast(trading_days: int, skip_star_market: bool):
+def run_fast(trading_days: int, skip_star_market: bool, workers: int):
     t0 = time.time()
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取近{trading_days}个交易日涨停股池"
           f"（沪深主板+创业板，快速候选名单）...")
@@ -80,33 +81,40 @@ def run_fast(trading_days: int, skip_star_market: bool):
     n_codes = pool["code"].nunique()
     print(f"    候选名单：{n_codes} 只股票（{len(pool)} 条涨停记录——同一只股票窗口内如果连续涨停"
           f"多次会记多条，比如\"连板5天\"就会出现5条，所以记录数比股票数多是正常的）。"
-          f"这份名单本身不含ST、不含科创板，是数据源接口自己的限制。")
+          f"这份名单本身不含ST、不含科创板，是数据源接口自己的限制。并发 {workers} 进程。")
 
     def _progress(i, total):
         if i % 20 == 0 or i == total:
             print(f"    校验进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
 
-    found = bps.scan_recent_limit_up_pool(trading_days=trading_days, progress_cb=_progress)
+    found = bps.scan_recent_limit_up_pool(trading_days=trading_days, progress_cb=_progress, max_workers=workers)
     print(f"    候选名单中命中底部首板信号 {len(found)} 只。")
 
     if not skip_star_market:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描科创板（涨停股池接口不覆盖，单独补上）...")
         universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
         star_codes = [c for c in universe.to_dict("records") if str(c["code"]).startswith(("688", "689"))]
-        print(f"    科创板范围内共 {len(star_codes)} 只。")
+        if len(star_codes) < 100:
+            # 科创板正常有大几百只，个位数/0只基本可以肯定是这一步的请求失败了（比如
+            # 短时间内请求太多被限流），不是真的没有科创板股票——明确报出来，不要悄悄
+            # 当成"科创板这次没有信号"糊弄过去，那样会掩盖真实的失败。
+            print(f"    ⚠️ 科创板范围内只有 {len(star_codes)} 只，明显不正常（正常应有大几百只），"
+                  f"本次跳过科创板扫描。最近内部错误：{ds.LAST_ERROR}")
+        else:
+            print(f"    科创板范围内共 {len(star_codes)} 只。")
 
-        def _progress_star(i, total):
-            if i % 50 == 0 or i == total:
-                print(f"    科创板扫描进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
+            def _progress_star(i, total):
+                if i % 50 == 0 or i == total:
+                    print(f"    科创板扫描进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
 
-        star_found = bps.scan_universe_for_new_setups(star_codes, progress_cb=_progress_star)
-        print(f"    科创板命中 {len(star_found)} 只。")
-        found = found + star_found
+            star_found = bps.scan_universe_for_new_setups(star_codes, progress_cb=_progress_star, max_workers=workers)
+            print(f"    科创板命中 {len(star_found)} 只。")
+            found = found + star_found
     else:
         print("    已跳过科创板（--skip-star-market）。")
 
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 刷新观察池回调状态...")
-    updates = bps.refresh_pullback_signals()
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 刷新观察池回调状态（并发 {workers} 进程）...")
+    updates = bps.refresh_pullback_signals(max_workers=workers)
     buy_signals = [u for u in updates if u["status"] == "buy_signal"]
     expired = [u for u in updates if u["status"] == "expired"]
     print(f"    {len(buy_signals)} 只进入回调买点区间，{len(expired)} 只观察期结束。")
@@ -121,7 +129,7 @@ def run_fast(trading_days: int, skip_star_market: bool):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描完成，共用时 {elapsed/60:.1f} 分钟。")
 
 
-def run_full_universe(limit: int | None):
+def run_full_universe(limit: int | None, workers: int):
     t0 = time.time()
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取选股范围（沪深主板+创业板+科创板，不含北交所）...")
     universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
@@ -131,7 +139,7 @@ def run_full_universe(limit: int | None):
     codes = universe.to_dict("records")
     if limit:
         codes = codes[:limit]
-    print(f"    范围内共 {len(universe)} 只，本次扫描 {len(codes)} 只。")
+    print(f"    范围内共 {len(universe)} 只，本次扫描 {len(codes)} 只（并发 {workers} 进程）。")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描底部首板信号（逐只拉取历史行情，请耐心等待）...")
 
@@ -139,11 +147,11 @@ def run_full_universe(limit: int | None):
         if i % 50 == 0 or i == total:
             print(f"    进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
 
-    found = bps.scan_universe_for_new_setups(codes, progress_cb=_progress)
+    found = bps.scan_universe_for_new_setups(codes, progress_cb=_progress, max_workers=workers)
     print(f"    本次新增命中 {len(found)} 只。")
 
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 刷新观察池回调状态...")
-    updates = bps.refresh_pullback_signals()
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 刷新观察池回调状态（并发 {workers} 进程）...")
+    updates = bps.refresh_pullback_signals(max_workers=workers)
     buy_signals = [u for u in updates if u["status"] == "buy_signal"]
     expired = [u for u in updates if u["status"] == "expired"]
     print(f"    {len(buy_signals)} 只进入回调买点区间，{len(expired)} 只观察期结束。")
@@ -163,13 +171,14 @@ def main():
                          help="快速方案默认包含科创板（单独补扫一次），加此参数跳过以求更快")
     parser.add_argument("--full-universe", action="store_true", help="改用旧的全市场逐只扫描方案（很慢）")
     parser.add_argument("--limit", type=int, default=None, help="仅 --full-universe 时生效：只扫描前N只（测试用）")
+    parser.add_argument("--workers", type=int, default=8, help="并发扫描的进程数（默认8）")
     args = parser.parse_args()
 
     db.init_db()
     if args.full_universe:
-        run_full_universe(limit=args.limit)
+        run_full_universe(limit=args.limit, workers=args.workers)
     else:
-        run_fast(trading_days=args.days, skip_star_market=args.skip_star_market)
+        run_fast(trading_days=args.days, skip_star_market=args.skip_star_market, workers=args.workers)
 
 
 if __name__ == "__main__":

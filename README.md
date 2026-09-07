@@ -24,10 +24,11 @@
 
 然后：
 
-3. 重点关注：第一个涨停板后**观察期10个交易日**（`PULLBACK_WINDOW_DAYS`）内，
+3. 重点关注（这一步也已用多进程并发刷新，观察池股票数越多提速越明显）：第一个
+   涨停板后**观察期20个交易日**（`PULLBACK_WINDOW_DAYS`）内，
    **回踩到涨停价位本身**的约5%左右（默认3%~7%区间）——比如涨停是90到100，回踩
    指的是回到93~97这个区间，不是如果股票后续继续上涨创出新高、从那个更高的价位
-   往下算的回调。10个交易日内没回踩到位就标记"观察期结束"，移出重点关注。对这些
+   往下算的回调。20个交易日内没回踩到位就标记"观察期结束"，移出重点关注。对这些
    股票额外标注 **MACD 确认**：近30个交易日内是否形成过金叉（DIF上穿DEA），且金叉之后
    DIF-DEA 持续向上发散（多头动能增强，不是叉完就死叉打回）。这只是多给的一个
    参考标注，不影响是否进入"回调买点区间"这个列表本身。
@@ -48,16 +49,19 @@
 4. 当日收盘价 < 前30日平均价格的1.2倍（`VOLUME_SURGE_PRICE_MAX_RATIO`），说明价格
    还没涨出去太多。
 
-市值过滤依赖东方财富实时快照的总市值字段，这个字段没有新浪备用数据源——如果当天
-东方财富连不上，这一步会自动跳过市值限制（脚本会打印提示），范围退化成沪深主板+
-创业板+科创板全市场，扫描会明显更慢。
+市值过滤依赖东方财富实时快照的总市值字段，这个字段没有新浪备用数据源。东方财富能
+连上时，除了当次使用还会顺带把这份市值快照缓存进本地数据库；东方财富连不上时自动
+退回上一次成功缓存的市值快照（哪怕缓存有几天旧了，也比完全不限市值扫全市场强）；
+只有"从来没成功缓存过"才会真的不限市值。
 
-这个股票池是全市场扫描（市值过滤后仍有大几千只），比股票池一的"涨停股池快速方案"
-慢很多，不建议跟 `daily_scan.py` 一起每天跑，找空闲时间（比如周末）单独跑一次即可：
+这个股票池即使市值过滤生效了，剩下的仍有大几千只要逐个拉历史算30日平均，比股票池
+一的"涨停股池快速方案"慢很多，默认已经用多进程并发（8个进程，实测约5倍提速），
+仍然建议找空闲时间（比如周末）单独跑一次，不用跟 `daily_scan.py` 绑在一起每天跑：
 
 ```bash
 python scan_volume_surge.py --limit 300   # 先测试
 python scan_volume_surge.py                # 完整扫描
+python scan_volume_surge.py --workers 16   # 调整并发进程数（默认8）
 ```
 
 ## 安装
@@ -88,12 +92,13 @@ streamlit run app.py
      小的名单（通常几百只以内）。
   2. 额外对科创板（688/689，不到1000只）单独做一次全量历史扫描，补上涨停股池
      覆盖不到的部分。
-  两步的候选股票再做完整的历史校验。比全市场扫描快很多，但因为科创板要单独全量
-  扫一遍，没有"只查候选名单"那么快。
+  两步的候选股票再做完整的历史校验，默认用多进程并发（8个进程，实测约5倍提速）。
+  比全市场扫描快很多，但因为科创板要单独全量扫一遍，没有"只查候选名单"那么快。
   ```bash
   python daily_scan.py                        # 近7个交易日，含科创板（默认）
   python daily_scan.py --days 10               # 改成近10个交易日
   python daily_scan.py --skip-star-market       # 跳过科创板，只查涨停股池名单（更快，但不覆盖科创板）
+  python daily_scan.py --workers 16             # 调整并发进程数（默认8）
   ```
 
 - **全市场方案**：对沪深主板+创业板+科创板全市场逐只扫描（不依赖涨停股池接口，
@@ -103,13 +108,6 @@ streamlit run app.py
   python daily_scan.py --full-universe --limit 300   # 先测试
   python daily_scan.py --full-universe                # 完整全市场扫描（收盘后跑，可能要跑很久）
   ```
-
-可以用 cron / launchd 把 `python daily_scan.py` 设置成每天收盘后自动跑一次，例如
-crontab：
-
-```
-30 15 * * 1-5 cd /Users/chengjiaying/Desktop/A_Stock_trading && .venv/bin/python daily_scan.py >> data/scan.log 2>&1
-```
 
 ## 每天怎么发布成网站（给朋友看）
 
@@ -132,27 +130,43 @@ crontab：
    `main` / `(root)`，Save。等一两分钟，页面会给你一个
    `https://你的用户名.github.io/仓库名/` 的网址，这就是发给朋友的链接。
 
-**以后每天更新**（这三步是核心，其余都是一次性的）：
+**以后每天更新**（这四步是核心，其余都是一次性的）：
 
 ```bash
 source .venv/bin/activate
-python daily_scan.py          # 1. 扫描，更新本地数据库
-python generate_site.py       # 2. 根据数据库最新内容重新生成 index.html
-git add -A && git commit -m "更新每日数据 $(date +%Y-%m-%d)" && git push   # 3. 推到 GitHub
+python daily_scan.py          # 1. 扫描股票池一：底部首板
+python scan_volume_surge.py   # 2. 扫描股票池二：地量后放量突破
+python generate_site.py       # 3. 根据数据库最新内容重新生成 index.html
+git add -A && git commit -m "更新每日数据 $(date +%Y-%m-%d)" && git push   # 4. 推到 GitHub
 ```
 
 推上去之后 GitHub Pages 会自动重新部署（一般一两分钟内生效），不需要在 Settings 里
-再点任何东西。这三步已经存成了 `publish.sh`，第一次用要给它执行权限：
+再点任何东西。这四步已经存成了 `publish.sh`：
 
 ```bash
-chmod +x publish.sh
+chmod +x publish.sh   # 第一次用要给它执行权限
 ./publish.sh
 ```
 
-之后每天只要跑 `./publish.sh` 就行。如果想做到完全自动（不用自己手动跑），可以用
-cron/launchd 定时跑这个脚本；也可以在 Claude Code 里用 `/schedule` 建一个云端定时
-任务代劳，但如果 claude.ai 的 GitHub 连接器当时连不上（这是已知会遇到的问题，跟账号
-权限无关），云端自动推送会失败，退回来手动跑或者本地 cron 更可靠。
+**已经设置成每天自动跑**，不用自己手动敲命令：用的是 macOS 自带的 launchd（比
+cron 更适合 Mac，睡眠唤醒后也能补跑），配置文件在
+`~/Library/LaunchAgents/com.jiaying.astock.publish.plist`，工作日下午 15:35 自动
+跑一次 `publish.sh`。日志在 `data/publish.log`，出问题可以先看这个文件排查。
+
+```bash
+# 加载/激活（改了 plist 之后也要重新执行这条让它生效）
+launchctl load -w ~/Library/LaunchAgents/com.jiaying.astock.publish.plist
+
+# 停用（比如出门一段时间不想让它自动跑）
+launchctl unload ~/Library/LaunchAgents/com.jiaying.astock.publish.plist
+
+# 手动触发一次（不用等到15:35，立刻跑一次，方便测试）
+launchctl start com.jiaying.astock.publish
+```
+
+前提是那个时间点 Mac 得是开着、没有关机/完全睡眠的（合盖但接了电源、开着"电源
+适配器"下的"防止自动睡眠"一般没问题；如果那个时刻正好在睡眠，launchd 通常会在
+下次唤醒后尽快补跑，但不保证）。
 
 数据库文件（`data/astock_toolkit.sqlite3`，含每只股票的历史K线缓存）不会被提交到
 GitHub（见 `.gitignore`）——它体积会越滚越大，也没必要公开；真正对外展示的只有
@@ -172,6 +186,23 @@ GitHub（见 `.gitignore`）——它体积会越滚越大，也没必要公开�
   不可用时该功能会跳过（不影响其它已经跑通的部分）。
 - 新浪的全市场快照接口需要分页拉取约5500只股票，降级模式下第一次请求可能要
   30~60秒；这也是为什么日常应该用快速方案而不是全市场方案。
+- 市值数据（东方财富快照的"总市值"字段）没有新浪备用数据源，但会在能连上的时候
+  自动缓存到本地（settings表），连不上时用缓存兜底，见上面"股票池二"说明。
+
+**踩过的坑（不要改回多线程）**：几个扫描函数用的是 `concurrent.futures.
+ProcessPoolExecutor`（多进程），不是多线程。这是因为新浪历史行情的降级路径
+（`stock_zh_a_daily`）内部每次调用都会新建一个 `py_mini_racer.MiniRacer()`
+（跑一段JS解密数据），底层是V8引擎——多个线程同时初始化V8会直接让整个Python
+进程崩溃（`[FATAL:address_pool_manager.cc(67)]`，不是能 try/except 捕获的
+Python异常），这个是实测触发过的，不是猜测。改用多进程后每个子进程有独立的
+V8/内存空间，问题就没有了，实测约5倍提速且稳定跑了两次没有崩溃。
+
+改用多进程之后还踩到第二个坑：子进程只要走过一次新浪降级路径，干完活正常退出时会
+**卡死不退出**（`sample <pid>` 抓栈能看到卡在 mini_racer 内部一个不会自己停的 V8
+消息泵后台线程上，Python 解释器收尾阶段要 join 它，永远 join 不完）。8个子进程里
+只要卡住1个，整个脚本的进度条哪怕跑满100%也会假死在原地不动，实测真实触发过（不
+是理论推测）。解决办法是给每个子进程注册 `atexit` 钩子在退出时直接 `os._exit(0)`，
+绕开这段会卡住的收尾流程。详见 `astock_toolkit/concurrency.py` 顶部注释。
 
 ## 需要你定期维护的配置（`astock_toolkit/config.py`）
 
