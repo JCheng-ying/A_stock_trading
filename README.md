@@ -151,18 +151,20 @@ streamlit run app.py
    `main` / `(root)`，Save。等一两分钟，页面会给你一个
    `https://你的用户名.github.io/仓库名/` 的网址，这就是发给朋友的链接。
 
-**以后每天更新**（这四步是核心，其余都是一次性的）：
+**以后每天更新**（这五步是核心，其余都是一次性的）：
 
 ```bash
 source .venv/bin/activate
 python daily_scan.py          # 1. 扫描股票池一：底部首板
 python scan_volume_surge.py   # 2. 扫描股票池二：地量后放量突破
-python generate_site.py       # 3. 根据数据库最新内容重新生成 index.html
-git add -A && git commit -m "更新每日数据 $(date +%Y-%m-%d)" && git push   # 4. 推到 GitHub
+python check_book_value.py    # 3. 核对净资产真实值，剔除不达标的（只查还没查过的股票，很快）
+python generate_site.py       # 4. 根据数据库最新内容重新生成 index.html
+git add -A && git commit -m "更新每日数据 $(date +%Y-%m-%d)" && git push   # 5. 推到 GitHub
 ```
 
 推上去之后 GitHub Pages 会自动重新部署（一般一两分钟内生效），不需要在 Settings 里
-再点任何东西。这四步已经存成了 `publish.sh`：
+再点任何东西。这五步已经存成了 `publish.sh`，每天自动跑（工作日美西时间早上6点，
+见下面 launchd 部分）也是跑的这一份，净资产核对这一步默认是这个自动化流程的一部分：
 
 ```bash
 chmod +x publish.sh   # 第一次用要给它执行权限
