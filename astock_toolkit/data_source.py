@@ -266,6 +266,39 @@ def _get_spot_snapshot_uncached() -> pd.DataFrame:
                                       "market_cap", "pb_ratio"])
 
 
+def get_book_value_per_share(code: str) -> dict | None:
+    """查单只股票财报披露的真实"每股净资产"（不是股价/市净率反推的近似值）。
+
+    用的是 `stock_financial_abstract` 这个按财报科目查询的接口，跟实时快照走的
+    是不同的数据源/host，实测在东方财富主快照接口连不上的环境下这个接口仍然可用。
+    是按单只股票查的（不是批量快照），所以只适合"扫描候选名单里这几百只"这种规模，
+    不适合每天对全市场做。财报按季度披露，不会天天变，查到后应该缓存起来长期复用
+    （见 db.get_book_value_cached / check_book_value.py），不需要每天重新查。
+
+    返回 {"book_value_per_share": float, "report_period": "20260630"} 或 None
+    （查不到 / 该科目缺失）。
+    """
+    try:
+        df = _retry(lambda: ak.stock_financial_abstract(code))
+        if df is None or df.empty:
+            return None
+        row = df[df["指标"] == "每股净资产"]
+        if row.empty:
+            return None
+        # 第0、1列是"选项"/"指标"，第2列往后按报告期倒序排列，取最新一期。
+        date_cols = [c for c in df.columns if c not in ("选项", "指标")]
+        if not date_cols:
+            return None
+        latest_col = date_cols[0]
+        val = row[latest_col].values[0]
+        if pd.isna(val):
+            return None
+        return {"book_value_per_share": float(val), "report_period": str(latest_col)}
+    except Exception as e:  # noqa: BLE001
+        _record_error(e, f"get_book_value_per_share({code})")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # 3. 行业板块实时强度排名
 # ---------------------------------------------------------------------------

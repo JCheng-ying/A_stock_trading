@@ -55,7 +55,16 @@ CREATE TABLE IF NOT EXISTS volume_surge_pool (
 );
 """
 
-SCHEMA = WATCHLIST_CREATE_SQL + VOLUME_SURGE_CREATE_SQL + """
+BOOK_VALUE_CACHE_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS book_value_cache (
+    code TEXT PRIMARY KEY,
+    book_value_per_share REAL,  -- 每股净资产（元），来自财报，不是股价/市净率反推的
+    report_period TEXT,         -- 对应报告期，如 '20260630'
+    fetched_at TEXT
+);
+"""
+
+SCHEMA = WATCHLIST_CREATE_SQL + VOLUME_SURGE_CREATE_SQL + BOOK_VALUE_CACHE_CREATE_SQL + """
 CREATE TABLE IF NOT EXISTS price_cache (
     code TEXT,
     date TEXT,
@@ -280,6 +289,37 @@ def list_volume_surge_added_on(date_str: str):
             (date_str,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# book_value_cache（每股净资产——按财报查的真实值，不是股价/市净率反推的近似值。
+# 财报按季度披露，不会天天变，查一次缓存起来长期有效，见 check_book_value.py）
+# ---------------------------------------------------------------------------
+
+def get_book_value_cached(code):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM book_value_cache WHERE code=?", (code,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_all_book_value_cache():
+    """返回 {code: {book_value_per_share, report_period, fetched_at}}。"""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM book_value_cache").fetchall()
+        return {r["code"]: dict(r) for r in rows}
+
+
+def upsert_book_value(code, book_value_per_share, report_period):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO book_value_cache (code, book_value_per_share, report_period, fetched_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
+            "book_value_per_share=excluded.book_value_per_share, "
+            "report_period=excluded.report_period, fetched_at=excluded.fetched_at",
+            (code, book_value_per_share, report_period, now_str()),
+        )
 
 
 # ---------------------------------------------------------------------------

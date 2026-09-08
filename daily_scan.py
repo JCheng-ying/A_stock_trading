@@ -46,17 +46,32 @@ except (AttributeError, ValueError):
 
 
 def _get_book_value_filter():
-    """拉取每股净资产数据（跟股票池二共用同一份东方财富快照+缓存，见
-    volume_surge_scanner.get_fundamentals_maps），返回一个 passes(code)->bool 的判断
-    函数，以及打印用的说明文字。数据本次不可用时 passes 永远返回 True（不做过滤，
-    而不是把候选全部当成不满足过滤掉）。
+    """判断每股净资产是否达标，优先用 check_book_value.py 查到的财报真实值（按季度
+    披露，不会天天变，查过一次就一直有效），查不到时退回股价/市净率反推的近似值
+    （跟股票池二共用同一份东方财富快照+缓存，见 volume_surge_scanner.get_fundamentals
+    _maps），两者都没有时不做过滤（而不是把候选全部当成不满足过滤掉）。
+
+    返回一个 passes(code)->bool 的判断函数，以及打印用的说明文字。
     """
+    book_value_cache = db.get_all_book_value_cache()
     _cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
-    if not fund_ok:
-        return (lambda code: True), "⚠️ 净资产数据本次不可用（东方财富连不上也没有缓存），本次跳过净资产过滤。"
-    src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
-    desc = f"净资产数据来源：{src_desc}，要求每股净资产 > {config.MIN_BOOK_VALUE_PER_SHARE}元。"
-    return (lambda code: bvps_map.get(code, 0) > config.MIN_BOOK_VALUE_PER_SHARE), desc
+
+    def passes(code):
+        cached = book_value_cache.get(code)
+        if cached and cached["book_value_per_share"] is not None:
+            return cached["book_value_per_share"] > config.MIN_BOOK_VALUE_PER_SHARE
+        if not fund_ok:
+            return True
+        return bvps_map.get(code, 0) > config.MIN_BOOK_VALUE_PER_SHARE
+
+    if fund_ok:
+        src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
+    else:
+        src_desc = "无（东方财富连不上也没有缓存）"
+    desc = (f"净资产数据：财报真实值缓存 {len(book_value_cache)} 只（见 check_book_value.py），"
+            f"其余股票退回股价/市净率反推的近似值，来源：{src_desc}。要求每股净资产 > "
+            f"{config.MIN_BOOK_VALUE_PER_SHARE}元。")
+    return passes, desc
 
 
 def _tag_board_heat(context: str):
