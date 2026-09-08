@@ -78,6 +78,12 @@ TEMPLATE = """<!doctype html>
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 10px; font-size: 13px; margin-bottom: 10px;
   }
+  .btn {
+    background: var(--panel); color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+    margin: 6px 0 16px;
+  }
+  .btn:hover { background: #1c2129; }
   /* A股习惯：涨（+）用红色，跌（-）用绿色，跟欧美惯例相反 */
   .pct-pos { color: var(--red); }
   .pct-neg { color: var(--green); }
@@ -90,6 +96,8 @@ TEMPLATE = """<!doctype html>
   <div class="meta" id="meta"></div>
 
   <div class="stat-row" id="stats"></div>
+
+  <button class="btn" id="download-pool1">📥 下载股票池一数据（CSV）</button>
 
   <h2>📊 板块热门度</h2>
   <div id="board-table"></div>
@@ -107,6 +115,7 @@ TEMPLATE = """<!doctype html>
 
   <h1 style="margin-top:56px">🔍 股票池二：地量后放量突破</h1>
   <div class="meta" id="vs-meta"></div>
+  <button class="btn" id="download-pool2">📥 下载股票池二数据（CSV）</button>
   <div id="vs-table"></div>
 
   <footer>纯决策辅助，不构成投资建议，买卖操作请自行判断。数据来源 AKShare，每日更新。</footer>
@@ -259,6 +268,68 @@ renderTable(document.getElementById("vs-table"), DATA.volume_surge_signals, [
   { label: "前30日均价", render: r => r.avg_price_30d != null ? Number(r.avg_price_30d).toFixed(2) : "" },
   { label: "备注", key: "note", cls: "note" },
 ]);
+
+// ---------------------------------------------------------------------------
+// 下载按钮：把当前页面打包的数据导出成 CSV，纯前端生成（Blob + 临时<a>），不需要
+// 服务器。导出的是这次网页打包的全部数据（不受"完整信号记录"筛选框影响），文件名
+// 按扫描日期命名。Excel 打开中文不乱码需要开头加 UTF-8 BOM。
+// ---------------------------------------------------------------------------
+function csvEscape(v) {
+  if (v == null) return "";
+  const s = String(v);
+  return /[",\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function toCSV(rows, columns) {
+  const header = columns.map(c => csvEscape(c.label)).join(",");
+  const lines = rows.map(row => columns.map(c => csvEscape(c.value(row))).join(","));
+  return "﻿" + [header].concat(lines).join("\\r\\n");
+}
+function downloadCSV(rows, columns, filename) {
+  const blob = new Blob([toCSV(rows, columns)], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+const pool1CsvColumns = [
+  { label: "代码", value: r => r.code },
+  { label: "名称", value: r => r.name },
+  { label: "板块", value: r => r.board },
+  { label: "板块涨跌幅(%)", value: r => r.board_pct_chg },
+  { label: "首板日", value: r => r.trigger_date },
+  { label: "首板价", value: r => r.trigger_price },
+  { label: "涨停后高点", value: r => r.post_high },
+  { label: "状态", value: r => STATUS_LABEL[r.status] || r.status },
+  { label: "MACD确认", value: r => (r.macd_confirmed === 1 || r.macd_confirmed === true) ? "是"
+      : ((r.macd_confirmed === 0 || r.macd_confirmed === false) ? "否" : "") },
+  { label: "MACD说明", value: r => r.macd_note },
+  { label: "备注", value: r => r.note },
+  { label: "新增时间", value: r => r.added_at },
+  { label: "更新时间", value: r => r.updated_at },
+];
+const pool2CsvColumns = [
+  { label: "代码", value: r => r.code },
+  { label: "名称", value: r => r.name },
+  { label: "触发日", value: r => r.trigger_date },
+  { label: "触发价", value: r => r.trigger_price },
+  { label: "前30日均换手(%)", value: r => r.avg_turnover_30d },
+  { label: "当日换手(%)", value: r => r.today_turnover },
+  { label: "前30日均价", value: r => r.avg_price_30d },
+  { label: "备注", value: r => r.note },
+  { label: "添加时间", value: r => r.added_at },
+];
+
+document.getElementById("download-pool1").addEventListener("click", () => {
+  const d = scanDate || "无日期";
+  downloadCSV(DATA.signals, pool1CsvColumns, "astock_底部首板_" + d + ".csv");
+});
+document.getElementById("download-pool2").addEventListener("click", () => {
+  const d = (DATA.vs_last_scan_at || "").slice(0, 10) || "无日期";
+  downloadCSV(DATA.volume_surge_signals, pool2CsvColumns, "astock_地量放量_" + d + ".csv");
+});
 </script>
 </body>
 </html>
