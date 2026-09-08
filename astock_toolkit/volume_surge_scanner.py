@@ -2,15 +2,17 @@
 
 条件（同时满足，"当日"以运行扫描那一刻能拿到的最新交易日为准）：
   1. 总市值 < MARKET_CAP_MAX_YI 亿人民币；
-  2. 此前 VOLUME_SURGE_LOOKBACK_DAYS 个交易日平均换手率 < VOLUME_SURGE_AVG_TURNOVER_MAX_PCT；
-  3. 当日换手率 >= 前30日平均换手率的 VOLUME_SURGE_RATIO 倍；
-  4. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍。
+  2. 每股净资产 > MIN_BOOK_VALUE_PER_SHARE 元（排除财务已经很差的公司）；
+  3. 此前 VOLUME_SURGE_LOOKBACK_DAYS 个交易日平均换手率 < VOLUME_SURGE_AVG_TURNOVER_MAX_PCT；
+  4. 当日换手率 >= 前30日平均换手率的 VOLUME_SURGE_RATIO 倍；
+  5. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍。
 
-市值过滤依赖东方财富实时快照的"总市值"字段（单位：元），新浪快照没有这个字段。
-东方财富能连上时，除了当次使用，还会把这份市值快照缓存进本地数据库（settings表）；
-东方财富连不上时，自动退回用上一次成功缓存的市值快照做过滤（哪怕缓存已经有几天旧了，
-市值排名在200亿这个量级附近，短期内变动不会大到影响筛选结果）。只有"从来没有成功
-缓存过"这一种情况，才会真的完全跳过市值过滤、退化成扫全市场。
+市值、每股净资产（=股价/市净率）这两个过滤条件依赖东方财富实时快照的"总市值"、
+"市净率"字段，新浪快照都没有这两个字段。东方财富能连上时，除了当次使用，还会把
+这份快照缓存进本地数据库（settings表）；东方财富连不上时，自动退回用上一次成功
+缓存的快照做过滤（哪怕缓存已经有几天旧了，这两个指标短期内变动不会大到影响筛选
+结果）。只有"从来没有成功缓存过"这一种情况，才会真的完全跳过这两个过滤条件、
+退化成扫全市场。
 
 跟 bottom_pattern_scanner.py 的观察池/回调买点那一套完全独立，写到单独的数据库表
 volume_surge_pool 里，不会互相干扰。
@@ -46,49 +48,78 @@ def _get_history_with_cache(code: str, days: int = config.HISTORY_FETCH_DAYS) ->
     if not all_rows:
         return pd.DataFrame()
     hist = pd.DataFrame(all_rows).sort_values("date").reset_index(drop=True)
+    # 增量拉取衔接处 pct_chg 会是 NaN 的坑，跟 bottom_pattern_scanner._get_history_
+    # with_cache 里那份注释是同一个问题，这里同样按合并后的完整收盘价序列重新算一遍。
+    hist["pct_chg"] = hist["close"].pct_change() * 100
     return hist.tail(days + 10).reset_index(drop=True)
 
 
 _MARKET_CAP_CACHE_KEY = "market_cap_snapshot_json"
 _MARKET_CAP_CACHE_AT_KEY = "market_cap_snapshot_at"
+_BVPS_CACHE_KEY = "bvps_snapshot_json"
+_BVPS_CACHE_AT_KEY = "bvps_snapshot_at"
 
 
-def get_market_cap_filtered_universe(max_cap_yi: float = config.MARKET_CAP_MAX_YI):
-    """返回 (universe_df, filter_applied, source)。
+def get_fundamentals_maps():
+    """返回 (cap_map, bvps_map, filter_applied, source)。
 
-    universe_df 列：code, name，已经按市值 < max_cap_yi 亿过滤过（除非 filter_applied
-    为 False）。source 说明市值数据的来源：
+    cap_map: {code: 总市值(元)}；bvps_map: {code: 每股净资产(元) = 股价/市净率}。
+    这两个字段都来自东方财富实时快照（"总市值"、"市净率"），都没有新浪备用数据源。
+    source 说明数据来源：
       - "live"：本次东方财富快照拉取成功，用的是最新数据（顺带已经写回缓存）；
-      - 一个时间字符串（如 "2026-09-05 23:59:21"）：东方财富这次连不上，用的是上次
-        成功缓存的市值快照，这个时间就是那次缓存的时间；
-      - None：从来没有成功缓存过市值数据，filter_applied=False，universe_df 是完整
-        选股范围（沪深主板+创业板+科创板，不含北交所/ST），调用方应提示用户这次没
-        做市值过滤。
+      - 一个时间字符串：东方财富这次连不上，用的是上次成功缓存的快照，这个时间就是
+        那次缓存的时间；
+      - None：从来没有成功缓存过，filter_applied=False，两个 map 都是空字典，调用方
+        应该跳过对应的过滤条件，而不是把候选全部当成"不满足"过滤掉。
     """
-    universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
-    if universe.empty:
-        return universe, False, None
-
-    max_cap_yuan = max_cap_yi * 1e8
     spot = ds.get_spot_snapshot()
     if not spot.empty and "market_cap" in spot.columns and spot["market_cap"].notna().sum() > 0:
         cap_df = spot.dropna(subset=["market_cap"])
         cap_map = dict(zip(cap_df["code"], cap_df["market_cap"]))
         db.set_setting(_MARKET_CAP_CACHE_KEY, json.dumps(cap_map))
         db.set_setting(_MARKET_CAP_CACHE_AT_KEY, db.now_str())
-        small_cap_codes = {c for c, mc in cap_map.items() if mc < max_cap_yuan}
-        filtered = universe[universe["code"].isin(small_cap_codes)].reset_index(drop=True)
-        return filtered, True, "live"
 
-    cached_json = db.get_setting(_MARKET_CAP_CACHE_KEY)
+        bvps_df = spot.dropna(subset=["pb_ratio", "price"])
+        bvps_df = bvps_df[bvps_df["pb_ratio"] != 0]
+        bvps_map = dict(zip(bvps_df["code"], bvps_df["price"] / bvps_df["pb_ratio"]))
+        db.set_setting(_BVPS_CACHE_KEY, json.dumps(bvps_map))
+        db.set_setting(_BVPS_CACHE_AT_KEY, db.now_str())
+        return cap_map, bvps_map, True, "live"
+
+    cached_cap_json = db.get_setting(_MARKET_CAP_CACHE_KEY)
     cached_at = db.get_setting(_MARKET_CAP_CACHE_AT_KEY)
-    if cached_json:
-        cap_map = json.loads(cached_json)
-        small_cap_codes = {c for c, mc in cap_map.items() if mc < max_cap_yuan}
-        filtered = universe[universe["code"].isin(small_cap_codes)].reset_index(drop=True)
-        return filtered, True, cached_at
+    if cached_cap_json:
+        cap_map = json.loads(cached_cap_json)
+        cached_bvps_json = db.get_setting(_BVPS_CACHE_KEY)
+        bvps_map = json.loads(cached_bvps_json) if cached_bvps_json else {}
+        return cap_map, bvps_map, True, cached_at
 
-    return universe, False, None
+    return {}, {}, False, None
+
+
+def get_market_cap_filtered_universe(max_cap_yi: float = config.MARKET_CAP_MAX_YI):
+    """返回 (universe_df, filter_applied, source)。
+
+    universe_df 列：code, name，已经按"市值 < max_cap_yi 亿"且"每股净资产 >
+    MIN_BOOK_VALUE_PER_SHARE"过滤过（除非 filter_applied 为 False）。source 含义见
+    get_fundamentals_maps。净资产数据缺失的股票按"不满足"处理（宁可漏选，不放过
+    净资产状况不明的股票）。
+    """
+    universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
+    if universe.empty:
+        return universe, False, None
+
+    cap_map, bvps_map, filter_applied, source = get_fundamentals_maps()
+    if not filter_applied:
+        return universe, False, None
+
+    max_cap_yuan = max_cap_yi * 1e8
+    ok_codes = {
+        c for c, mc in cap_map.items()
+        if mc < max_cap_yuan and bvps_map.get(c, 0) > config.MIN_BOOK_VALUE_PER_SHARE
+    }
+    filtered = universe[universe["code"].isin(ok_codes)].reset_index(drop=True)
+    return filtered, True, source
 
 
 def detect_volume_surge_signal(hist: pd.DataFrame, code: str) -> dict | None:

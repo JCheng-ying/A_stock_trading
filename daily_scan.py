@@ -34,7 +34,8 @@ import sys
 import time
 from datetime import datetime
 
-from astock_toolkit import bottom_pattern_scanner as bps, config, data_source as ds, db, sector_heat
+from astock_toolkit import (bottom_pattern_scanner as bps, config, data_source as ds, db,
+                             sector_heat, volume_surge_scanner as vss)
 
 # 重定向到文件/管道（比如 cron 里 `>> log 2>&1`）时 stdout 默认是整块缓冲的，进度
 # 打印会攒到进程结束才一次性写出。这里强制行缓冲，保证日志能实时看到扫描进度。
@@ -42,6 +43,20 @@ try:
     sys.stdout.reconfigure(line_buffering=True)
 except (AttributeError, ValueError):
     pass
+
+
+def _get_book_value_filter():
+    """拉取每股净资产数据（跟股票池二共用同一份东方财富快照+缓存，见
+    volume_surge_scanner.get_fundamentals_maps），返回一个 passes(code)->bool 的判断
+    函数，以及打印用的说明文字。数据本次不可用时 passes 永远返回 True（不做过滤，
+    而不是把候选全部当成不满足过滤掉）。
+    """
+    _cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
+    if not fund_ok:
+        return (lambda code: True), "⚠️ 净资产数据本次不可用（东方财富连不上也没有缓存），本次跳过净资产过滤。"
+    src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
+    desc = f"净资产数据来源：{src_desc}，要求每股净资产 > {config.MIN_BOOK_VALUE_PER_SHARE}元。"
+    return (lambda code: bvps_map.get(code, 0) > config.MIN_BOOK_VALUE_PER_SHARE), desc
 
 
 def _tag_board_heat(context: str):
@@ -72,16 +87,23 @@ def _tag_board_heat(context: str):
 
 def run_fast(trading_days: int, skip_star_market: bool, workers: int):
     t0 = time.time()
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取净资产数据用于过滤...")
+    passes_book_value, bvps_desc = _get_book_value_filter()
+    print(f"    {bvps_desc}")
+
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取近{trading_days}个交易日涨停股池"
           f"（沪深主板+创业板，快速候选名单）...")
     pool = ds.get_recent_limit_up_candidates(trading_days=trading_days)
     if pool.empty:
         print("❌ 未能获取涨停股池数据（可能是非交易日窗口，或接口暂不可用）。最近内部错误：", ds.LAST_ERROR)
         sys.exit(1)
+    before_n = pool["code"].nunique()
+    pool = pool[pool["code"].map(passes_book_value)].reset_index(drop=True)
     n_codes = pool["code"].nunique()
-    print(f"    候选名单：{n_codes} 只股票（{len(pool)} 条涨停记录——同一只股票窗口内如果连续涨停"
-          f"多次会记多条，比如\"连板5天\"就会出现5条，所以记录数比股票数多是正常的）。"
-          f"这份名单本身不含ST、不含科创板，是数据源接口自己的限制。并发 {workers} 进程。")
+    print(f"    候选名单：{n_codes} 只股票（净资产过滤前 {before_n} 只；{len(pool)} 条涨停"
+          f"记录——同一只股票窗口内如果连续涨停多次会记多条，比如\"连板5天\"就会出现5条，"
+          f"所以记录数比股票数多是正常的）。这份名单本身不含ST、不含科创板，是数据源接口"
+          f"自己的限制。并发 {workers} 进程。")
 
     def _progress(i, total):
         if i % 20 == 0 or i == total:
@@ -101,7 +123,9 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
             print(f"    ⚠️ 科创板范围内只有 {len(star_codes)} 只，明显不正常（正常应有大几百只），"
                   f"本次跳过科创板扫描。最近内部错误：{ds.LAST_ERROR}")
         else:
-            print(f"    科创板范围内共 {len(star_codes)} 只。")
+            before_star = len(star_codes)
+            star_codes = [c for c in star_codes if passes_book_value(c["code"])]
+            print(f"    科创板范围内共 {before_star} 只，净资产过滤后剩 {len(star_codes)} 只。")
 
             def _progress_star(i, total):
                 if i % 50 == 0 or i == total:
@@ -131,15 +155,23 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
 
 def run_full_universe(limit: int | None, workers: int):
     t0 = time.time()
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取净资产数据用于过滤...")
+    passes_book_value, bvps_desc = _get_book_value_filter()
+    print(f"    {bvps_desc}")
+
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取选股范围（沪深主板+创业板+科创板，不含北交所）...")
     universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
     if universe.empty:
         print("❌ 未能获取股票代码列表，请检查网络后重试。最近内部错误：", ds.LAST_ERROR)
         sys.exit(1)
     codes = universe.to_dict("records")
+    before_n = len(codes)
+    codes = [c for c in codes if passes_book_value(c["code"])]
+    after_n = len(codes)
     if limit:
         codes = codes[:limit]
-    print(f"    范围内共 {len(universe)} 只，本次扫描 {len(codes)} 只（并发 {workers} 进程）。")
+    print(f"    范围内共 {before_n} 只，净资产过滤后 {after_n} 只，本次扫描 {len(codes)} 只"
+          f"（并发 {workers} 进程）。")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描底部首板信号（逐只拉取历史行情，请耐心等待）...")
 

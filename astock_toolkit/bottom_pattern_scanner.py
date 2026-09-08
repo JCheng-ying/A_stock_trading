@@ -49,6 +49,16 @@ def _get_history_with_cache(code: str, days: int = config.HISTORY_FETCH_DAYS) ->
     if not all_rows:
         return pd.DataFrame()
     hist = pd.DataFrame(all_rows).sort_values("date").reset_index(drop=True)
+    # 踩过的坑：增量拉取时，每次新拉的那一小段自己算 pct_chg 会在"衔接处"因为缺
+    # 前一天的参考价而算出 NaN（新浪降级路径是本地 close.pct_change() 算的，第一行
+    # 必然是 NaN），存库时又是按(code,date) upsert，这个 NaN 会覆盖掉衔接那天之前
+    # 已经算对的 pct_chg。后果很隐蔽：detect_bottom_reversal_signal 里"此前N个交易
+    # 日没涨停过"的检查用了 dropna()，衔接那天哪怕真涨停了也会因为 pct_chg 是 NaN
+    # 被直接漏检，导致"二板"被错判成"首板"（实测真实出现过：000635/600830/603978
+    # 三只票就是这么混进观察池的，涨停日期都刚好卡在某次增量拉取的衔接处）。这里
+    # 统一按合并后连续的收盘价序列重新算一遍 pct_chg，不再信任每次抓取时自己算的
+    # 那一段，从根上避免衔接处的 NaN。
+    hist["pct_chg"] = hist["close"].pct_change() * 100
     return hist.tail(days + 10).reset_index(drop=True)
 
 
