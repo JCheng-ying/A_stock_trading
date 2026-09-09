@@ -93,7 +93,9 @@ TOP_BOARDS_FOR_HEAT_TAGGING = 20
 #      1. 总市值 < MARKET_CAP_MAX_YI 亿人民币；
 #      2. 此前 VOLUME_SURGE_LOOKBACK_DAYS 个交易日平均换手率 < VOLUME_SURGE_AVG_TURNOVER_MAX_PCT；
 #      3. 当日换手率 >= 前30日平均换手率的 VOLUME_SURGE_RATIO 倍；
-#      4. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍。
+#      4. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍；
+#      5. 是放量的"第一天"：过去 VOLUME_SURGE_LOOKBACK_DAYS 个交易日内，没有哪天
+#         也满足过第3条（避免同一轮放量连续好几天都被记一遍）。
 #    市值过滤依赖东方财富实时快照的总市值字段，该字段没有新浪备用数据源——如果东方
 #    财富当天连不上，这个股票池会跳过市值过滤这一步（scan_volume_surge.py 里会提示）。
 # ---------------------------------------------------------------------------

@@ -5,7 +5,9 @@
   2. 每股净资产 > MIN_BOOK_VALUE_PER_SHARE 元（排除财务已经很差的公司）；
   3. 此前 VOLUME_SURGE_LOOKBACK_DAYS 个交易日平均换手率 < VOLUME_SURGE_AVG_TURNOVER_MAX_PCT；
   4. 当日换手率 >= 前30日平均换手率的 VOLUME_SURGE_RATIO 倍；
-  5. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍。
+  5. 当日收盘价 < 前30日平均收盘价的 VOLUME_SURGE_PRICE_MAX_RATIO 倍；
+  6. 是放量的"第一天"：过去 VOLUME_SURGE_LOOKBACK_DAYS 个交易日内没有哪天也满足过
+     第4条，避免同一轮放量连续好几天都被记一遍。
 
 市值、每股净资产（=股价/市净率）这两个过滤条件依赖东方财富实时快照的"总市值"、
 "市净率"字段，新浪快照都没有这两个字段。东方财富能连上时，除了当次使用，还会把
@@ -123,10 +125,19 @@ def get_market_cap_filtered_universe(max_cap_yi: float = config.MARKET_CAP_MAX_Y
 
 
 def detect_volume_surge_signal(hist: pd.DataFrame, code: str) -> dict | None:
-    """对给定历史行情（按日期升序，最新一行为待检测日）判断是否命中"地量后放量"信号。"""
+    """对给定历史行情（按日期升序，最新一行为待检测日）判断是否命中"地量后放量"信号。
+
+    只标记放量的"第一天"：如果过去 VOLUME_SURGE_LOOKBACK_DAYS 个交易日内已经有某天
+    也满足过"相对其自身前30日均值放量"这条，说明这轮放量已经持续了好几天，今天不是
+    起点，不重复标记——否则同一轮放量会连续好几天都被记进池子里（实测真实出现过：
+    好几十只股票在9-04和9-07都各被记了一遍，换手率一直维持在几倍水平，其实是同一次
+    放量事件）。
+    """
     df = hist.dropna(subset=["close", "turnover_rate"]).reset_index(drop=True)
     window = config.VOLUME_SURGE_LOOKBACK_DAYS
-    if len(df) < window + 1:
+    # 今天(1) + 判断"是不是第一天"要回看的窗口(window) + 回看窗口里每一天各自的
+    # 前置均值窗口(window)，所以至少要有这么多天的数据。
+    if len(df) < window * 2 + 1:
         return None
 
     today = df.iloc[-1]
@@ -152,6 +163,13 @@ def detect_volume_surge_signal(hist: pd.DataFrame, code: str) -> dict | None:
         return None
     # 3) 当日价格还没大涨：收盘价不超过前30日均价的 M 倍
     if today_close >= avg_price * config.VOLUME_SURGE_PRICE_MAX_RATIO:
+        return None
+    # 4) 是"第一天"放量：过去window个交易日内，不应该已经有某一天也满足过"相对其
+    #    自身前30日均值放量"这条。
+    rolling_avg = df["turnover_rate"].rolling(window=window, min_periods=window).mean().shift(1)
+    is_surge_day = df["turnover_rate"] >= rolling_avg * config.VOLUME_SURGE_RATIO
+    prior_surge_days = is_surge_day.iloc[-(window + 1):-1]
+    if prior_surge_days.fillna(False).any():
         return None
 
     return {
