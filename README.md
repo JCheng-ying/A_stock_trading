@@ -153,20 +153,29 @@ streamlit run app.py
    `main` / `(root)`，Save。等一两分钟，页面会给你一个
    `https://你的用户名.github.io/仓库名/` 的网址，这就是发给朋友的链接。
 
-**以后每天更新**（这五步是核心，其余都是一次性的）：
+**以后每天更新**：两个股票池是分开跑、分开推送的，不是等两个都扫完才一起推——
+股票池一比较快，跑完先生成网页推一版上去；股票池二慢很多（可能十几分钟甚至更久），
+跑完再生成网页推第二版。这样股票池一的结果不用等股票池二跑完才能上线：
 
 ```bash
 source .venv/bin/activate
-python daily_scan.py          # 1. 扫描股票池一：底部首板
-python scan_volume_surge.py   # 2. 扫描股票池二：地量后放量突破
-python check_book_value.py    # 3. 核对净资产真实值，剔除不达标的（只查还没查过的股票，很快）
-python generate_site.py       # 4. 根据数据库最新内容重新生成 index.html
-git add -A && git commit -m "更新每日数据 $(date +%Y-%m-%d)" && git push   # 5. 推到 GitHub
+
+# 股票池一：底部首板
+python daily_scan.py          # 1. 扫描
+python check_book_value.py    # 2. 核对净资产真实值，剔除不达标的（只查还没查过的股票，很快）
+python generate_site.py       # 3. 重新生成 index.html
+git add -A && git commit -m "更新股票池一 $(date +%Y-%m-%d)" && git push
+
+# 股票池二：地量后放量突破
+python scan_volume_surge.py   # 1. 扫描（比较慢）
+python check_book_value.py    # 2. 核对净资产真实值（这次基本只用查股票池二新出现的股票）
+python generate_site.py       # 3. 重新生成 index.html
+git add -A && git commit -m "更新股票池二 $(date +%Y-%m-%d)" && git push
 ```
 
 推上去之后 GitHub Pages 会自动重新部署（一般一两分钟内生效），不需要在 Settings 里
-再点任何东西。这五步已经存成了 `publish.sh`，每天自动跑（工作日美西时间早上6点，
-见下面 launchd 部分）也是跑的这一份，净资产核对这一步默认是这个自动化流程的一部分：
+再点任何东西。这套流程已经存成了 `publish.sh`，每天自动跑（工作日美西时间早上6点，
+见下面 launchd 部分）也是跑的这一份：
 
 ```bash
 chmod +x publish.sh   # 第一次用要给它执行权限
