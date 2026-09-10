@@ -88,6 +88,25 @@ TEMPLATE = """<!doctype html>
   .pct-pos { color: var(--red); }
   .pct-neg { color: var(--green); }
   footer { color: var(--dim); font-size: 12px; margin-top: 48px; }
+  tr.clickable { cursor: pointer; }
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: #000000aa;
+    z-index: 100; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; max-width: 820px; width: 100%; max-height: 90vh; overflow-y: auto;
+  }
+  .modal-box h3 { margin: 0 0 4px; font-size: 17px; }
+  .modal-box .modal-sub { color: var(--dim); font-size: 12.5px; margin-bottom: 14px; }
+  .modal-close {
+    float: right; background: none; border: none; color: var(--dim); font-size: 20px;
+    cursor: pointer; line-height: 1;
+  }
+  .modal-close:hover { color: var(--text); }
+  .chart-legend { display: flex; gap: 16px; font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .chart-legend span.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; }
 </style>
 </head>
 <body>
@@ -121,6 +140,20 @@ TEMPLATE = """<!doctype html>
   <footer>纯决策辅助，不构成投资建议，买卖操作请自行判断。数据来源 AKShare，每日更新。</footer>
 </div>
 
+<div class="modal-overlay" id="chart-modal">
+  <div class="modal-box">
+    <button class="modal-close" id="chart-modal-close">✕</button>
+    <h3 id="chart-title"></h3>
+    <div class="modal-sub" id="chart-sub"></div>
+    <div id="chart-container"></div>
+    <div class="chart-legend">
+      <span><span class="dot" style="background:var(--red)"></span>收盘价高于开盘价（阳线）</span>
+      <span><span class="dot" style="background:var(--green)"></span>收盘价低于开盘价（阴线）</span>
+      <span><span class="dot" style="background:var(--accent)"></span>信号触发日</span>
+    </div>
+  </div>
+</div>
+
 <script>
 const DATA = __DATA_JSON__;
 const STATUS_LABEL = { watching: "观察中", buy_signal: "回调至买点区间", expired: "观察期结束" };
@@ -137,7 +170,7 @@ function el(tag, attrs, children) {
 }
 function text(tag, s, attrs) { return el(tag, attrs, [document.createTextNode(s == null ? "" : s)]); }
 
-function renderTable(container, rows, columns) {
+function renderTable(container, rows, columns, onRowClick) {
   container.innerHTML = "";
   if (!rows || rows.length === 0) {
     container.appendChild(el("div", { class: "empty" }, [document.createTextNode("暂无数据。")]));
@@ -152,7 +185,7 @@ function renderTable(container, rows, columns) {
   table.appendChild(thead);
   const tbody = el("tbody");
   rows.forEach(row => {
-    const tr = el("tr");
+    const tr = el("tr", onRowClick ? { class: "clickable", title: "点击查看K线图" } : null);
     columns.forEach(c => {
       const val = c.render ? c.render(row) : (row[c.key] == null ? "" : row[c.key]);
       if (val instanceof Node) {
@@ -161,6 +194,7 @@ function renderTable(container, rows, columns) {
         tr.appendChild(text("td", val, c.cls ? { class: c.cls } : null));
       }
     });
+    if (onRowClick) tr.addEventListener("click", () => onRowClick(row));
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
@@ -181,6 +215,96 @@ function pctCell(v) {
   span.textContent = (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
   return span;
 }
+
+// ---------------------------------------------------------------------------
+// K线图：点一行弹出浮层，用纯SVG手画蜡烛图（不依赖任何外部图表库），数据是
+// generate_site.py 打包进 DATA.price_history 的本地历史行情缓存（扫描时早就
+// 拉取过了，这里只是重新展示，不会触发任何新的网络请求）。
+// ---------------------------------------------------------------------------
+function drawCandlestickSVG(rows, triggerDate) {
+  // rows: [[date, open, high, low, close, volume], ...] 按日期升序
+  const W = 780, H = 340, padL = 54, padR = 12, padT = 12, padB = 26;
+  const volH = 60; // 底部成交量条区域高度
+  const plotH = H - padT - padB - volH - 8;
+  const plotW = W - padL - padR;
+  const n = rows.length;
+  const highs = rows.map(r => r[2]);
+  const lows = rows.map(r => r[3]);
+  const vols = rows.map(r => r[5] || 0);
+  const maxP = Math.max(...highs);
+  const minP = Math.min(...lows);
+  const priceRange = (maxP - minP) || 1;
+  const maxVol = Math.max(...vols) || 1;
+  const barW = plotW / n;
+  const bodyW = Math.max(barW * 0.62, 1);
+  const x = i => padL + i * barW + barW / 2;
+  const y = p => padT + plotH - ((p - minP) / priceRange) * plotH;
+  const volY0 = padT + plotH + 8;
+  const yVol = v => volY0 + volH - (v / maxVol) * volH;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;background:var(--panel)">`;
+
+  // 价格网格线 + 左侧刻度（高/中/低三条）
+  [maxP, (maxP + minP) / 2, minP].forEach(p => {
+    const yy = y(p);
+    svg += `<line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}" stroke="var(--border)" stroke-width="1"/>`;
+    svg += `<text x="4" y="${yy + 4}" font-size="10" fill="var(--dim)">${p.toFixed(2)}</text>`;
+  });
+
+  rows.forEach((row, i) => {
+    const [date, o, h, l, c] = row;
+    const vol = row[5] || 0;
+    const isUp = c >= o; // A股：阳线（涨）红色，阴线（跌）绿色
+    const color = isUp ? "var(--red)" : "var(--green)";
+    const cx = x(i);
+    svg += `<line x1="${cx}" y1="${y(h)}" x2="${cx}" y2="${y(l)}" stroke="${color}" stroke-width="1"/>`;
+    const bodyTop = y(Math.max(o, c));
+    const bodyBot = y(Math.min(o, c));
+    const bodyH = Math.max(bodyBot - bodyTop, 1);
+    svg += `<rect x="${cx - bodyW / 2}" y="${bodyTop}" width="${bodyW}" height="${bodyH}" fill="${color}"/>`;
+    // 成交量条
+    const vh = Math.max((vol / maxVol) * volH, 1);
+    svg += `<rect x="${cx - bodyW / 2}" y="${yVol(vol)}" width="${bodyW}" height="${vh}" fill="${color}" opacity="0.55"/>`;
+    if (date === triggerDate) {
+      svg += `<line x1="${cx}" y1="${padT}" x2="${cx}" y2="${volY0 + volH}" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3,3"/>`;
+    }
+  });
+
+  // 底部日期刻度：首/中/末三个
+  [0, Math.floor((n - 1) / 2), n - 1].forEach(i => {
+    if (i < 0 || i >= n) return;
+    svg += `<text x="${x(i)}" y="${H - 6}" font-size="10" fill="var(--dim)" text-anchor="middle">${rows[i][0].slice(5)}</text>`;
+  });
+
+  svg += `</svg>`;
+  return svg;
+}
+
+function openChart(code, name, triggerDate) {
+  const rows = (DATA.price_history || {})[code];
+  document.getElementById("chart-title").textContent = code + "  " + (name || "");
+  document.getElementById("chart-sub").textContent = triggerDate
+    ? "信号触发日：" + triggerDate + "（图中蓝色虚线标注）　·　最近" + (rows ? rows.length : 0) + "个交易日"
+    : "最近" + (rows ? rows.length : 0) + "个交易日";
+  const container = document.getElementById("chart-container");
+  if (!rows || rows.length === 0) {
+    container.innerHTML = '<div class="empty">暂无K线数据（可能是本地历史行情缓存还没有这只股票）。</div>';
+  } else {
+    container.innerHTML = drawCandlestickSVG(rows, triggerDate);
+  }
+  document.getElementById("chart-modal").classList.add("open");
+}
+function closeChart() {
+  document.getElementById("chart-modal").classList.remove("open");
+}
+document.getElementById("chart-modal-close").addEventListener("click", closeChart);
+document.getElementById("chart-modal").addEventListener("click", (e) => {
+  if (e.target.id === "chart-modal") closeChart();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeChart();
+});
+function withChartClick(row) { openChart(row.code, row.name, row.trigger_date); }
 
 document.getElementById("meta").textContent =
   "最后扫描时间：" + (DATA.last_scan_at || "无") + "　·　扫描范围：" + (DATA.universe_count || "无");
@@ -227,7 +351,7 @@ const signalColumns = [
   { label: "MACD确认", render: macdCell },
   { label: "备注", key: "note", cls: "note" },
 ];
-renderTable(document.getElementById("new-table"), newSignals, signalColumns);
+renderTable(document.getElementById("new-table"), newSignals, signalColumns, withChartClick);
 
 const buySignals = DATA.signals.filter(s => s.status === "buy_signal");
 renderTable(document.getElementById("buy-table"), buySignals, [
@@ -241,7 +365,7 @@ renderTable(document.getElementById("buy-table"), buySignals, [
   { label: "MACD确认", render: macdCell },
   { label: "MACD说明", key: "macd_note", cls: "note" },
   { label: "备注", key: "note", cls: "note" },
-]);
+], withChartClick);
 
 const filterSel = document.getElementById("status-filter");
 [["all", "全部"], ["watching", "观察中"], ["buy_signal", "买点区间"], ["expired", "观察期结束"]]
@@ -250,7 +374,7 @@ function renderAll() {
   const v = filterSel.value;
   const rows = (v === "all" ? DATA.signals : DATA.signals.filter(s => s.status === v))
     .slice().sort((a, b) => (b.trigger_date || "").localeCompare(a.trigger_date || ""));
-  renderTable(document.getElementById("all-table"), rows, signalColumns);
+  renderTable(document.getElementById("all-table"), rows, signalColumns, withChartClick);
 }
 filterSel.addEventListener("change", renderAll);
 renderAll();
@@ -267,7 +391,7 @@ renderTable(document.getElementById("vs-table"), DATA.volume_surge_signals, [
   { label: "当日换手", render: r => r.today_turnover != null ? Number(r.today_turnover).toFixed(2) + "%" : "" },
   { label: "前30日均价", render: r => r.avg_price_30d != null ? Number(r.avg_price_30d).toFixed(2) : "" },
   { label: "备注", key: "note", cls: "note" },
-]);
+], withChartClick);
 
 // ---------------------------------------------------------------------------
 // 下载按钮：把当前页面打包的数据导出成 CSV，纯前端生成（Blob + 临时<a>），不需要
@@ -336,12 +460,38 @@ document.getElementById("download-pool2").addEventListener("click", () => {
 """
 
 
+PRICE_HISTORY_DAYS = 120  # 给K线图用，取每只股票最近N个交易日的本地缓存行情
+
+
+def build_price_history(codes: set[str]) -> dict:
+    """给点进去看K线图这个功能打包数据。数据来自 price_cache 本地缓存——扫描时
+    （_get_history_with_cache）早就拉取过了，这里只是重新读出来打包进网页，不会
+    再发起任何新的网络请求，跟扫描速度完全无关。
+
+    压缩成 [date, open, high, low, close, volume] 数组而不是带字段名的对象，
+    省掉重复的key名字，网页体积能小不少。
+    """
+    history = {}
+    for code in codes:
+        rows = db.get_cached_history(code)
+        if not rows:
+            continue
+        rows = rows[-PRICE_HISTORY_DAYS:]
+        history[code] = [
+            [r["date"], r["open"], r["high"], r["low"], r["close"], r["volume"]]
+            for r in rows
+        ]
+    return history
+
+
 def build_data() -> dict:
     last_scan_at = db.get_setting("last_scan_at") or ""
     universe_count = db.get_setting("last_scan_universe_count") or ""
     ranking_json = db.get_setting("last_board_ranking_json")
     board_ranking = json.loads(ranking_json) if ranking_json else []
     signals = db.list_watchlist()
+    volume_surge_signals = db.list_volume_surge()
+    codes = {r["code"] for r in signals} | {r["code"] for r in volume_surge_signals}
     return {
         "last_scan_at": last_scan_at,
         "universe_count": universe_count,
@@ -351,7 +501,8 @@ def build_data() -> dict:
         "macd_lookback_days": config.MACD_CROSS_LOOKBACK_DAYS,
         "vs_last_scan_at": db.get_setting("last_volume_surge_scan_at") or "",
         "vs_universe_count": db.get_setting("last_volume_surge_universe_count") or "",
-        "volume_surge_signals": db.list_volume_surge(),
+        "volume_surge_signals": volume_surge_signals,
+        "price_history": build_price_history(codes),
     }
 
 
