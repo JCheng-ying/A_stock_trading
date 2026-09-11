@@ -281,13 +281,22 @@ function drawCandlestickSVG(rows, triggerDate) {
 }
 
 // ---------------------------------------------------------------------------
-// 实时行情：弹窗打开后，除了先显示打包进网页的历史缓存K线，还会额外去新浪的
-// 实时行情接口（hq.sinajs.cn）取一下最新价，把"今天"这根K线更新成实时的——
-// 这是这个网站唯一会发起的外部网络请求（其余都是纯静态、打包好的数据）。走的是
-// <script src> 标签加载（不是 fetch），因为这个接口没有开 CORS，用 fetch 直接
-// 会被浏览器拦掉；用 <script> 标签加载不受 CORS 限制，这也是很多网页"实时行情"
-// 小组件的老办法。取不到（比如接口不可用、网络问题、被浏览器扩展拦截）就什么都
-// 不做，只显示历史缓存数据，不影响其它功能。
+// 实时行情：弹窗打开后，除了先显示打包进网页的历史缓存K线，还会额外去腾讯的
+// 实时行情接口（qt.gtimg.cn）取一下最新价，把"今天"这根K线更新成实时的——
+// 这是这个网站唯一会发起的外部网络请求（其余都是纯静态、打包好的数据）。
+//
+// 踩过的坑：一开始用的是新浪 hq.sinajs.cn，本地用 curl 带上
+// `Referer: https://finance.sina.com.cn` 测试是通的，但真放到网页上全都失败——
+// 因为新浪这个接口按 Referer 做了防盗链，只认自家域名发起的请求，而浏览器发起的
+// 跨域请求，Referer 只会是网页自己的真实地址（比如这个GitHub Pages的域名），
+// JS 没办法伪造成新浪自己的域名（这是浏览器强制的，改不了）。实测直接用 curl
+// 模拟"从 GitHub Pages 域名请求"，新浪返回 403 Forbidden，而本地测试用假 Referer
+// 蒙混过去看着是通的，这是本地测试没测对场景，不是网页代码本身的bug。
+//
+// 换成腾讯的接口后不认 Referer，而且直接带了 `access-control-allow-origin: *`
+// （真正开了 CORS），所以这里改用标准的 fetch 而不是 <script> 标签硬凑。取不到
+// （接口不可用、网络问题、超时、被浏览器扩展拦截）就什么都不做，只显示历史缓存
+// 数据，不影响其它功能。
 // ---------------------------------------------------------------------------
 function marketPrefix(code) {
   if (/^(60|68|9)/.test(code)) return "sh";
@@ -299,34 +308,32 @@ let _liveQuoteSeq = 0;
 function fetchLiveQuote(code, cb) {
   const seq = ++_liveQuoteSeq;
   const prefixed = marketPrefix(code) + code;
-  const varName = "hq_str_" + prefixed;
-  const scriptId = "live-quote-script";
-  const old = document.getElementById(scriptId);
-  if (old) old.remove();
-  let done = false;
-  const finish = (result) => {
-    if (done || seq !== _liveQuoteSeq) return; // 已经被新的一次点击取代，丢弃这次结果
-    done = true;
-    cb(result);
-  };
-  const timer = setTimeout(() => finish(null), 5000);
-  const script = document.createElement("script");
-  script.id = scriptId;
-  script.src = "https://hq.sinajs.cn/list=" + prefixed + "&_=" + Date.now();
-  script.onload = () => {
-    clearTimeout(timer);
-    const raw = window[varName];
-    if (!raw) { finish(null); return; }
-    const parts = raw.split(",");
-    if (parts.length < 32 || !parts[3]) { finish(null); return; }
-    finish({
-      open: parseFloat(parts[1]), high: parseFloat(parts[4]), low: parseFloat(parts[5]),
-      close: parseFloat(parts[3]), volume: parseFloat(parts[8]), // 新浪这里也是"股"，跟历史缓存单位一致，不用换算
-      date: parts[30], time: parts[31],
-    });
-  };
-  script.onerror = () => { clearTimeout(timer); finish(null); };
-  document.head.appendChild(script);
+  const finish = (result) => { if (seq === _liveQuoteSeq) cb(result); };
+  const controller = ("AbortController" in window) ? new AbortController() : null;
+  const timer = setTimeout(() => { if (controller) controller.abort(); }, 5000);
+  fetch("https://qt.gtimg.cn/q=" + prefixed + "&_=" + Date.now(),
+        { cache: "no-store", signal: controller ? controller.signal : undefined })
+    .then(r => r.text())
+    .then(raw => {
+      clearTimeout(timer);
+      const marker = 'v_' + prefixed + '="';
+      const idx = raw.indexOf(marker);
+      if (idx === -1) { finish(null); return; }
+      // 股票名称那个字段是GBK编码，fetch按UTF-8解码会花掉，但我们不需要那个字段，
+      // 后面用到的都是纯数字字段，"~"分隔符本身是ASCII，不受编码影响，不用管它。
+      const parts = raw.slice(idx + marker.length).split("~");
+      if (parts.length < 35) { finish(null); return; }
+      const close = parseFloat(parts[3]);
+      const ts = parts[30] || "";
+      if (!(close > 0) || ts.length < 14) { finish(null); return; }
+      finish({
+        open: parseFloat(parts[5]), high: parseFloat(parts[33]), low: parseFloat(parts[34]),
+        close, volume: parseFloat(parts[6]) * 100, // 腾讯这里是"手"，*100换算成"股"跟历史缓存对齐
+        date: ts.slice(0, 4) + "-" + ts.slice(4, 6) + "-" + ts.slice(6, 8),
+        time: ts.slice(8, 10) + ":" + ts.slice(10, 12) + ":" + ts.slice(12, 14),
+      });
+    })
+    .catch(() => { clearTimeout(timer); finish(null); });
 }
 
 function openChart(code, name, triggerDate) {
