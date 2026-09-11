@@ -282,8 +282,10 @@ function drawCandlestickSVG(rows, triggerDate) {
 
 // ---------------------------------------------------------------------------
 // 实时行情：弹窗打开后，除了先显示打包进网页的历史缓存K线，还会额外去腾讯的
-// 实时行情接口（qt.gtimg.cn）取一下最新价，把"今天"这根K线更新成实时的——
-// 这是这个网站唯一会发起的外部网络请求（其余都是纯静态、打包好的数据）。
+// 实时行情接口（qt.gtimg.cn）取一下最新价，把"今天"这根K线更新成实时的，并且
+// 每隔 LIVE_QUOTE_REFRESH_MS（15秒）自动重新取一次，弹窗关掉才停——不是打开
+// 那一下取个快照就完事，是真的会自己刷新的。这是这个网站唯一会发起的外部网络
+// 请求（其余都是纯静态、打包好的数据）。
 //
 // 踩过的坑：一开始用的是新浪 hq.sinajs.cn，本地用 curl 带上
 // `Referer: https://finance.sina.com.cn` 测试是通的，但真放到网页上全都失败——
@@ -336,7 +338,12 @@ function fetchLiveQuote(code, cb) {
     .catch(() => { clearTimeout(timer); finish(null); });
 }
 
+const LIVE_QUOTE_REFRESH_MS = 15000; // 弹窗开着的时候，隔多久自动再取一次实时行情
+let _chartRefreshTimer = null;
+
 function openChart(code, name, triggerDate) {
+  if (_chartRefreshTimer) { clearInterval(_chartRefreshTimer); _chartRefreshTimer = null; }
+
   const cached = (DATA.price_history || {})[code] || [];
   document.getElementById("chart-title").textContent = code + "  " + (name || "");
   const subEl = document.getElementById("chart-sub");
@@ -352,26 +359,34 @@ function openChart(code, name, triggerDate) {
       : '<div class="empty">暂无K线数据（可能是本地历史行情缓存还没有这只股票）。</div>';
   }
 
+  // 每次都是从原始的 cached 基础上重新合并，不是在上一次合并结果上再叠加——
+  // 不然每隔15秒就会重复"追加"一根，越叠越多。
+  function refreshLive() {
+    fetchLiveQuote(code, (live) => {
+      if (!live || !(live.close > 0)) {
+        render(cached, cached.length ? "实时行情获取失败，以下是最近一次扫描缓存的数据" : "");
+        return;
+      }
+      const liveBar = [live.date, live.open, live.high, live.low, live.close, live.volume];
+      let merged = cached;
+      if (cached.length && cached[cached.length - 1][0] === live.date) {
+        merged = cached.slice(0, -1).concat([liveBar]); // 今天已经有一根缓存的，用实时数据覆盖
+      } else if (!cached.length || live.date >= cached[cached.length - 1][0]) {
+        merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
+      }
+      render(merged, "🔴 实时 " + live.date + " " + (live.time || "") + "（每" +
+        (LIVE_QUOTE_REFRESH_MS / 1000) + "秒自动刷新）");
+    });
+  }
+
   render(cached, "🔄 正在获取实时行情…");
   document.getElementById("chart-modal").classList.add("open");
-
-  fetchLiveQuote(code, (live) => {
-    if (!live || !(live.close > 0)) {
-      render(cached, cached.length ? "实时行情获取失败，以下是最近一次扫描缓存的数据" : "");
-      return;
-    }
-    const liveBar = [live.date, live.open, live.high, live.low, live.close, live.volume];
-    let merged = cached;
-    if (cached.length && cached[cached.length - 1][0] === live.date) {
-      merged = cached.slice(0, -1).concat([liveBar]); // 今天已经有一根缓存的，用实时数据覆盖
-    } else if (!cached.length || live.date >= cached[cached.length - 1][0]) {
-      merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
-    }
-    render(merged, "🔴 实时 " + live.date + " " + (live.time || ""));
-  });
+  refreshLive();
+  _chartRefreshTimer = setInterval(refreshLive, LIVE_QUOTE_REFRESH_MS);
 }
 function closeChart() {
   document.getElementById("chart-modal").classList.remove("open");
+  if (_chartRefreshTimer) { clearInterval(_chartRefreshTimer); _chartRefreshTimer = null; }
 }
 document.getElementById("chart-modal-close").addEventListener("click", closeChart);
 document.getElementById("chart-modal").addEventListener("click", (e) => {
