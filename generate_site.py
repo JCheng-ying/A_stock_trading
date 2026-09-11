@@ -280,19 +280,88 @@ function drawCandlestickSVG(rows, triggerDate) {
   return svg;
 }
 
+// ---------------------------------------------------------------------------
+// 实时行情：弹窗打开后，除了先显示打包进网页的历史缓存K线，还会额外去新浪的
+// 实时行情接口（hq.sinajs.cn）取一下最新价，把"今天"这根K线更新成实时的——
+// 这是这个网站唯一会发起的外部网络请求（其余都是纯静态、打包好的数据）。走的是
+// <script src> 标签加载（不是 fetch），因为这个接口没有开 CORS，用 fetch 直接
+// 会被浏览器拦掉；用 <script> 标签加载不受 CORS 限制，这也是很多网页"实时行情"
+// 小组件的老办法。取不到（比如接口不可用、网络问题、被浏览器扩展拦截）就什么都
+// 不做，只显示历史缓存数据，不影响其它功能。
+// ---------------------------------------------------------------------------
+function marketPrefix(code) {
+  if (/^(60|68|9)/.test(code)) return "sh";
+  if (/^(00|30|20)/.test(code)) return "sz";
+  if (/^(8|4|92)/.test(code)) return "bj";
+  return "sh";
+}
+let _liveQuoteSeq = 0;
+function fetchLiveQuote(code, cb) {
+  const seq = ++_liveQuoteSeq;
+  const prefixed = marketPrefix(code) + code;
+  const varName = "hq_str_" + prefixed;
+  const scriptId = "live-quote-script";
+  const old = document.getElementById(scriptId);
+  if (old) old.remove();
+  let done = false;
+  const finish = (result) => {
+    if (done || seq !== _liveQuoteSeq) return; // 已经被新的一次点击取代，丢弃这次结果
+    done = true;
+    cb(result);
+  };
+  const timer = setTimeout(() => finish(null), 5000);
+  const script = document.createElement("script");
+  script.id = scriptId;
+  script.src = "https://hq.sinajs.cn/list=" + prefixed + "&_=" + Date.now();
+  script.onload = () => {
+    clearTimeout(timer);
+    const raw = window[varName];
+    if (!raw) { finish(null); return; }
+    const parts = raw.split(",");
+    if (parts.length < 32 || !parts[3]) { finish(null); return; }
+    finish({
+      open: parseFloat(parts[1]), high: parseFloat(parts[4]), low: parseFloat(parts[5]),
+      close: parseFloat(parts[3]), volume: parseFloat(parts[8]), // 新浪这里也是"股"，跟历史缓存单位一致，不用换算
+      date: parts[30], time: parts[31],
+    });
+  };
+  script.onerror = () => { clearTimeout(timer); finish(null); };
+  document.head.appendChild(script);
+}
+
 function openChart(code, name, triggerDate) {
-  const rows = (DATA.price_history || {})[code];
+  const cached = (DATA.price_history || {})[code] || [];
   document.getElementById("chart-title").textContent = code + "  " + (name || "");
-  document.getElementById("chart-sub").textContent = triggerDate
-    ? "信号触发日：" + triggerDate + "（图中蓝色虚线标注）　·　最近" + (rows ? rows.length : 0) + "个交易日"
-    : "最近" + (rows ? rows.length : 0) + "个交易日";
+  const subEl = document.getElementById("chart-sub");
   const container = document.getElementById("chart-container");
-  if (!rows || rows.length === 0) {
-    container.innerHTML = '<div class="empty">暂无K线数据（可能是本地历史行情缓存还没有这只股票）。</div>';
-  } else {
-    container.innerHTML = drawCandlestickSVG(rows, triggerDate);
+
+  function render(rows, liveNote) {
+    const base = triggerDate
+      ? "信号触发日：" + triggerDate + "（图中蓝色虚线标注）　·　最近" + rows.length + "个交易日"
+      : "最近" + rows.length + "个交易日";
+    subEl.textContent = base + (liveNote ? "　·　" + liveNote : "");
+    container.innerHTML = rows.length
+      ? drawCandlestickSVG(rows, triggerDate)
+      : '<div class="empty">暂无K线数据（可能是本地历史行情缓存还没有这只股票）。</div>';
   }
+
+  render(cached, "🔄 正在获取实时行情…");
   document.getElementById("chart-modal").classList.add("open");
+
+  fetchLiveQuote(code, (live) => {
+    if (!live || !(live.close > 0)) {
+      render(cached, cached.length ? "实时行情获取失败，以下是最近一次扫描缓存的数据" : "");
+      return;
+    }
+    const liveBar = [live.date, live.open, live.high, live.low, live.close, live.volume];
+    let merged = cached;
+    if (cached.length && cached[cached.length - 1][0] === live.date) {
+      merged = cached.slice(0, -1).concat([liveBar]); // 今天已经有一根缓存的，用实时数据覆盖
+    } else if (!cached.length || live.date >= cached[cached.length - 1][0]) {
+      merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
+    }
+    render(merged, "🔴 实时 " + live.date + " " + (live.time || ""));
+  });
 }
 function closeChart() {
   document.getElementById("chart-modal").classList.remove("open");

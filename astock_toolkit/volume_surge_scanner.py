@@ -106,6 +106,11 @@ def get_market_cap_filtered_universe(max_cap_yi: float = config.MARKET_CAP_MAX_Y
     MIN_BOOK_VALUE_PER_SHARE"过滤过（除非 filter_applied 为 False）。source 含义见
     get_fundamentals_maps。净资产数据缺失的股票按"不满足"处理（宁可漏选，不放过
     净资产状况不明的股票）。
+
+    注意：这里不做"总市值/半年营收"那条过滤——半年营收没有批量快照接口，只能按
+    单只股票查（stock_financial_abstract），没法对全市场几千只都查一遍。那条过滤
+    是在股票已经命中放量信号、进了股票池之后，由 check_book_value.py 做事后核对
+    并删除不达标的，见该脚本顶部注释。
     """
     universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
     if universe.empty:

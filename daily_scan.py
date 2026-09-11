@@ -45,32 +45,46 @@ except (AttributeError, ValueError):
     pass
 
 
-def _get_book_value_filter():
-    """判断每股净资产是否达标，优先用 check_book_value.py 查到的财报真实值（按季度
-    披露，不会天天变，查过一次就一直有效），查不到时退回股价/市净率反推的近似值
-    （跟股票池二共用同一份东方财富快照+缓存，见 volume_surge_scanner.get_fundamentals
-    _maps），两者都没有时不做过滤（而不是把候选全部当成不满足过滤掉）。
+def _get_fundamental_filter():
+    """判断候选股票是否满足两条基本面要求：
+      1. 每股净资产 > MIN_BOOK_VALUE_PER_SHARE：优先用 check_book_value.py 查到的
+         财报真实值（按季度披露，不会天天变，查过一次就一直有效），查不到时退回
+         股价/市净率反推的近似值，两者都没有时不做这条过滤。
+      2. 总市值 / 半年营收 <= MAX_MARKET_CAP_TO_H1_REVENUE：半年营收用财报真实值
+         缓存（查不到就不做这条过滤——宁可漏判，不能拿不到数据的股票当成一定超标），
+         总市值必须是当天实时值（跟净资产不同，市值天天在变，不能只查一次缓存到底）。
+    两者共用同一份东方财富市值快照/缓存，见 volume_surge_scanner.get_fundamentals_maps。
 
     返回一个 passes(code)->bool 的判断函数，以及打印用的说明文字。
     """
     book_value_cache = db.get_all_book_value_cache()
-    _cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
+    cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
 
     def passes(code):
         cached = book_value_cache.get(code)
+        # 1) 每股净资产
         if cached and cached["book_value_per_share"] is not None:
-            return cached["book_value_per_share"] > config.MIN_BOOK_VALUE_PER_SHARE
-        if not fund_ok:
-            return True
-        return bvps_map.get(code, 0) > config.MIN_BOOK_VALUE_PER_SHARE
+            if cached["book_value_per_share"] <= config.MIN_BOOK_VALUE_PER_SHARE:
+                return False
+        elif fund_ok and bvps_map.get(code, 0) <= config.MIN_BOOK_VALUE_PER_SHARE:
+            return False
+        # 2) 总市值 / 半年营收
+        h1 = cached["h1_revenue"] if cached else None
+        mc = cap_map.get(code) if fund_ok else None
+        if h1 is not None and mc is not None:
+            ratio = (mc / h1) if h1 > 0 else float("inf")
+            if ratio > config.MAX_MARKET_CAP_TO_H1_REVENUE:
+                return False
+        return True
 
     if fund_ok:
         src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
     else:
         src_desc = "无（东方财富连不上也没有缓存）"
-    desc = (f"净资产数据：财报真实值缓存 {len(book_value_cache)} 只（见 check_book_value.py），"
-            f"其余股票退回股价/市净率反推的近似值，来源：{src_desc}。要求每股净资产 > "
-            f"{config.MIN_BOOK_VALUE_PER_SHARE}元。")
+    desc = (f"净资产/半年营收财报真实值缓存 {len(book_value_cache)} 只（见 check_book_value.py），"
+            f"净资产缺失时退回股价/市净率反推的近似值，市值来源：{src_desc}。要求每股净资产 > "
+            f"{config.MIN_BOOK_VALUE_PER_SHARE}元，总市值/半年营收 <= "
+            f"{config.MAX_MARKET_CAP_TO_H1_REVENUE}。")
     return passes, desc
 
 
@@ -102,9 +116,9 @@ def _tag_board_heat(context: str):
 
 def run_fast(trading_days: int, skip_star_market: bool, workers: int):
     t0 = time.time()
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取净资产数据用于过滤...")
-    passes_book_value, bvps_desc = _get_book_value_filter()
-    print(f"    {bvps_desc}")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
+    passes_fundamentals, fund_desc = _get_fundamental_filter()
+    print(f"    {fund_desc}")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取近{trading_days}个交易日涨停股池"
           f"（沪深主板+创业板，快速候选名单）...")
@@ -113,9 +127,9 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
         print("❌ 未能获取涨停股池数据（可能是非交易日窗口，或接口暂不可用）。最近内部错误：", ds.LAST_ERROR)
         sys.exit(1)
     before_n = pool["code"].nunique()
-    pool = pool[pool["code"].map(passes_book_value)].reset_index(drop=True)
+    pool = pool[pool["code"].map(passes_fundamentals)].reset_index(drop=True)
     n_codes = pool["code"].nunique()
-    print(f"    候选名单：{n_codes} 只股票（净资产过滤前 {before_n} 只；{len(pool)} 条涨停"
+    print(f"    候选名单：{n_codes} 只股票（基本面过滤前 {before_n} 只；{len(pool)} 条涨停"
           f"记录——同一只股票窗口内如果连续涨停多次会记多条，比如\"连板5天\"就会出现5条，"
           f"所以记录数比股票数多是正常的）。这份名单本身不含ST、不含科创板，是数据源接口"
           f"自己的限制。并发 {workers} 进程。")
@@ -139,8 +153,8 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
                   f"本次跳过科创板扫描。最近内部错误：{ds.LAST_ERROR}")
         else:
             before_star = len(star_codes)
-            star_codes = [c for c in star_codes if passes_book_value(c["code"])]
-            print(f"    科创板范围内共 {before_star} 只，净资产过滤后剩 {len(star_codes)} 只。")
+            star_codes = [c for c in star_codes if passes_fundamentals(c["code"])]
+            print(f"    科创板范围内共 {before_star} 只，基本面过滤后剩 {len(star_codes)} 只。")
 
             def _progress_star(i, total):
                 if i % 50 == 0 or i == total:
@@ -170,9 +184,9 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
 
 def run_full_universe(limit: int | None, workers: int):
     t0 = time.time()
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取净资产数据用于过滤...")
-    passes_book_value, bvps_desc = _get_book_value_filter()
-    print(f"    {bvps_desc}")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
+    passes_fundamentals, fund_desc = _get_fundamental_filter()
+    print(f"    {fund_desc}")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取选股范围（沪深主板+创业板+科创板，不含北交所）...")
     universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
@@ -181,11 +195,11 @@ def run_full_universe(limit: int | None, workers: int):
         sys.exit(1)
     codes = universe.to_dict("records")
     before_n = len(codes)
-    codes = [c for c in codes if passes_book_value(c["code"])]
+    codes = [c for c in codes if passes_fundamentals(c["code"])]
     after_n = len(codes)
     if limit:
         codes = codes[:limit]
-    print(f"    范围内共 {before_n} 只，净资产过滤后 {after_n} 只，本次扫描 {len(codes)} 只"
+    print(f"    范围内共 {before_n} 只，基本面过滤后 {after_n} 只，本次扫描 {len(codes)} 只"
           f"（并发 {workers} 进程）。")
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描底部首板信号（逐只拉取历史行情，请耐心等待）...")

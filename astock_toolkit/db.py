@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS book_value_cache (
     code TEXT PRIMARY KEY,
     book_value_per_share REAL,  -- 每股净资产（元），来自财报，不是股价/市净率反推的
     report_period TEXT,         -- 对应报告期，如 '20260630'
+    h1_revenue REAL,            -- 最近一期半年报的营业总收入（元），用于算 总市值/半年营收
+    h1_revenue_period TEXT,     -- 对应半年报报告期，如 '20260630'（固定是0630结尾）
     fetched_at TEXT
 );
 """
@@ -124,6 +126,11 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {coltype}")
     for old_table in ("holdings", "journal"):
         conn.execute(f"DROP TABLE IF EXISTS {old_table}")
+
+    bvc_cols = {row[1] for row in conn.execute("PRAGMA table_info(book_value_cache)")}
+    for col, coltype in (("h1_revenue", "REAL"), ("h1_revenue_period", "TEXT")):
+        if col not in bvc_cols:
+            conn.execute(f"ALTER TABLE book_value_cache ADD COLUMN {col} {coltype}")
 
     # 旧版本 watchlist 主键只有 code：同一只股票第二次出现信号时会直接覆盖第一次的记录，
     # 历史信号会丢失。这里检测到还是老的单列主键时，迁移成 (code, trigger_date) 复合主键，
@@ -292,8 +299,9 @@ def list_volume_surge_added_on(date_str: str):
 
 
 # ---------------------------------------------------------------------------
-# book_value_cache（每股净资产——按财报查的真实值，不是股价/市净率反推的近似值。
-# 财报按季度披露，不会天天变，查一次缓存起来长期有效，见 check_book_value.py）
+# book_value_cache（每股净资产 + 半年报营业总收入——按财报查的真实值，不是股价/
+# 市净率反推的近似值。财报按季度披露，不会天天变，查一次缓存起来长期有效，见
+# check_book_value.py。半年营收只在有新的0630报告期时才会更新）
 # ---------------------------------------------------------------------------
 
 def get_book_value_cached(code):
@@ -305,20 +313,26 @@ def get_book_value_cached(code):
 
 
 def get_all_book_value_cache():
-    """返回 {code: {book_value_per_share, report_period, fetched_at}}。"""
+    """返回 {code: {book_value_per_share, report_period, h1_revenue, h1_revenue_period,
+    fetched_at}}。"""
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM book_value_cache").fetchall()
         return {r["code"]: dict(r) for r in rows}
 
 
-def upsert_book_value(code, book_value_per_share, report_period):
+def upsert_book_value(code, book_value_per_share, report_period, h1_revenue=None,
+                       h1_revenue_period=None):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO book_value_cache (code, book_value_per_share, report_period, fetched_at) "
-            "VALUES (?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
+            "INSERT INTO book_value_cache (code, book_value_per_share, report_period, "
+            "h1_revenue, h1_revenue_period, fetched_at) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
             "book_value_per_share=excluded.book_value_per_share, "
-            "report_period=excluded.report_period, fetched_at=excluded.fetched_at",
-            (code, book_value_per_share, report_period, now_str()),
+            "report_period=excluded.report_period, "
+            "h1_revenue=COALESCE(excluded.h1_revenue, book_value_cache.h1_revenue), "
+            "h1_revenue_period=COALESCE(excluded.h1_revenue_period, book_value_cache.h1_revenue_period), "
+            "fetched_at=excluded.fetched_at",
+            (code, book_value_per_share, report_period, h1_revenue, h1_revenue_period, now_str()),
         )
 
 
