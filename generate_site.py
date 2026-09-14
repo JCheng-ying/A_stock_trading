@@ -107,6 +107,12 @@ TEMPLATE = """<!doctype html>
   .modal-close:hover { color: var(--text); }
   .chart-legend { display: flex; gap: 16px; font-size: 12px; color: var(--dim); margin-top: 8px; }
   .chart-legend span.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; }
+  .chart-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+  .chart-tab {
+    background: var(--bg); color: var(--dim); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 12px; font-size: 12.5px; cursor: pointer;
+  }
+  .chart-tab.active { color: var(--accent); border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -145,11 +151,20 @@ TEMPLATE = """<!doctype html>
     <button class="modal-close" id="chart-modal-close">✕</button>
     <h3 id="chart-title"></h3>
     <div class="modal-sub" id="chart-sub"></div>
+    <div class="chart-tabs">
+      <button class="chart-tab active" id="tab-daily">日K线</button>
+      <button class="chart-tab" id="tab-intraday">今日分时</button>
+    </div>
     <div id="chart-container"></div>
-    <div class="chart-legend">
+    <div class="chart-legend" id="chart-legend-daily">
       <span><span class="dot" style="background:var(--red)"></span>收盘价高于开盘价（阳线）</span>
       <span><span class="dot" style="background:var(--green)"></span>收盘价低于开盘价（阴线）</span>
       <span><span class="dot" style="background:var(--accent)"></span>信号触发日</span>
+    </div>
+    <div class="chart-legend" id="chart-legend-intraday" style="display:none">
+      <span><span class="dot" style="background:var(--red)"></span>现价高于昨收</span>
+      <span><span class="dot" style="background:var(--green)"></span>现价低于昨收</span>
+      <span><span class="dot" style="background:var(--dim)"></span>昨收参考线</span>
     </div>
   </div>
 </div>
@@ -338,13 +353,102 @@ function fetchLiveQuote(code, cb) {
     .catch(() => { clearTimeout(timer); finish(null); });
 }
 
+// ---------------------------------------------------------------------------
+// 今日分时：跟"日K线+实时快照"是两回事——日K线那根"今天"的蜡烛只是一个整体的
+// OHLC快照，分时图给的是今天从开盘到现在，价格一分钟一分钟怎么走的完整曲线。
+// 用的是腾讯的分时行情接口（web.ifzq.gtimg.cn，跟K线实时快照的 qt.gtimg.cn 是
+// 同一家，同样支持标准CORS），返回的是干净的JSON（不是tilde分隔的老格式），
+// 每一条是"HHMM 价格 累计成交量(股) 累计成交额"。上午9:30-11:30、下午13:00-15:00
+// 中间有个午休，按分钟序号压缩掉这段空档（跟真实的分时图软件一个做法），不是
+// 按时钟时间等比例画，不然中间会空出一大段。
+// ---------------------------------------------------------------------------
+const INTRADAY_TOTAL_MIN = 242; // 上午121分钟(9:30~11:30) + 下午121分钟(13:00~15:00)
+function intradayMinuteIndex(hhmm) {
+  const t = parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(2, 4), 10);
+  const morningStart = 9 * 60 + 30, morningEnd = 11 * 60 + 30, afternoonStart = 13 * 60;
+  return t <= morningEnd ? t - morningStart : (morningEnd - morningStart) + (t - afternoonStart);
+}
+let _intradaySeq = 0;
+function fetchIntradayData(code, cb) {
+  const seq = ++_intradaySeq;
+  const finish = (result) => { if (seq === _intradaySeq) cb(result); };
+  const prefixed = marketPrefix(code) + code;
+  const controller = ("AbortController" in window) ? new AbortController() : null;
+  const timer = setTimeout(() => { if (controller) controller.abort(); }, 6000);
+  fetch("https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=" + prefixed + "&_=" + Date.now(),
+        { cache: "no-store", signal: controller ? controller.signal : undefined })
+    .then(r => r.json())
+    .then(json => {
+      clearTimeout(timer);
+      const entry = json && json.data && json.data[prefixed];
+      const rawPoints = entry && entry.data && entry.data.data;
+      const qt = entry && entry.qt && entry.qt[prefixed];
+      if (!rawPoints || !rawPoints.length || !qt) { finish(null); return; }
+      const prevClose = parseFloat(qt[4]);
+      if (!(prevClose > 0)) { finish(null); return; }
+      let prevCumVol = 0;
+      const points = rawPoints.map((line) => {
+        const bits = line.split(" ");
+        const cumVol = parseFloat(bits[2]);
+        const vol = Math.max(cumVol - prevCumVol, 0);
+        prevCumVol = cumVol;
+        return { time: bits[0], price: parseFloat(bits[1]), vol };
+      });
+      finish({ points, prevClose });
+    })
+    .catch(() => { clearTimeout(timer); finish(null); });
+}
+
+function drawIntradaySVG(points, prevClose) {
+  const W = 780, H = 340, padL = 54, padR = 12, padT = 12, padB = 26, volH = 60;
+  const plotH = H - padT - padB - volH - 8;
+  const plotW = W - padL - padR;
+  const n = INTRADAY_TOTAL_MIN;
+  const maxDelta = Math.max(...points.map(p => Math.abs(p.price - prevClose)), prevClose * 0.005);
+  const minP = prevClose - maxDelta, maxP = prevClose + maxDelta;
+  const priceRange = (maxP - minP) || 1;
+  const maxVol = Math.max(...points.map(p => p.vol), 1);
+  const x = (i) => padL + (i / (n - 1)) * plotW;
+  const y = (p) => padT + plotH - ((p - minP) / priceRange) * plotH;
+  const volY0 = padT + plotH + 8;
+  const isUp = points.length > 0 && points[points.length - 1].price >= prevClose;
+  const color = isUp ? "var(--red)" : "var(--green)"; // A股：现价高于昨收=红，低于=绿
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;background:var(--panel)">`;
+  [maxP, prevClose, minP].forEach((p) => {
+    const yy = y(p);
+    svg += `<line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}" stroke="var(--border)" stroke-width="1"` +
+      (p === prevClose ? ' stroke-dasharray="3,3"' : "") + `/>`;
+    svg += `<text x="4" y="${yy + 4}" font-size="10" fill="var(--dim)">${p.toFixed(2)}</text>`;
+  });
+  if (points.length) {
+    const linePts = points.map((p) => x(intradayMinuteIndex(p.time)) + "," + y(p.price)).join(" ");
+    svg += `<polyline points="${linePts}" fill="none" stroke="${color}" stroke-width="1.3"/>`;
+    points.forEach((p) => {
+      const cx = x(intradayMinuteIndex(p.time));
+      const vh = p.vol > 0 ? Math.max((p.vol / maxVol) * volH, 1) : 0;
+      svg += `<rect x="${cx - 0.8}" y="${volY0 + volH - vh}" width="1.6" height="${vh}" fill="${color}" opacity="0.55"/>`;
+    });
+  }
+  [[0, "09:30"], [120, "11:30"], [121, "13:00"], [241, "15:00"]].forEach(([i, label]) => {
+    svg += `<text x="${x(i)}" y="${H - 6}" font-size="10" fill="var(--dim)" text-anchor="middle">${label}</text>`;
+  });
+  svg += `</svg>`;
+  return svg;
+}
+
 function openChart(code, name, triggerDate) {
   const cached = (DATA.price_history || {})[code] || [];
   document.getElementById("chart-title").textContent = code + "  " + (name || "");
   const subEl = document.getElementById("chart-sub");
   const container = document.getElementById("chart-container");
+  const tabDaily = document.getElementById("tab-daily");
+  const tabIntraday = document.getElementById("tab-intraday");
+  const legendDaily = document.getElementById("chart-legend-daily");
+  const legendIntraday = document.getElementById("chart-legend-intraday");
+  let intradayData = null; // 缓存这次弹窗里已经取到的分时数据，来回切tab不用重新发请求
 
-  function render(rows, liveNote) {
+  function renderDaily(rows, liveNote) {
     const base = triggerDate
       ? "信号触发日：" + triggerDate + "（图中蓝色虚线标注）　·　最近" + rows.length + "个交易日"
       : "最近" + rows.length + "个交易日";
@@ -354,24 +458,57 @@ function openChart(code, name, triggerDate) {
       : '<div class="empty">暂无K线数据（可能是本地历史行情缓存还没有这只股票）。</div>';
   }
 
-  render(cached, "🔄 正在获取实时行情…");
-  document.getElementById("chart-modal").classList.add("open");
+  function showDailyTab() {
+    tabDaily.classList.add("active");
+    tabIntraday.classList.remove("active");
+    legendDaily.style.display = "";
+    legendIntraday.style.display = "none";
+    renderDaily(cached, "🔄 正在获取实时行情…");
+    // 只在打开的这一刻取一次快照，不设定时器、不自动刷新。
+    fetchLiveQuote(code, (live) => {
+      if (!live || !(live.close > 0)) {
+        renderDaily(cached, cached.length ? "实时行情获取失败，以下是最近一次扫描缓存的数据" : "");
+        return;
+      }
+      const liveBar = [live.date, live.open, live.high, live.low, live.close, live.volume];
+      let merged = cached;
+      if (cached.length && cached[cached.length - 1][0] === live.date) {
+        merged = cached.slice(0, -1).concat([liveBar]); // 今天已经有一根缓存的，用实时数据覆盖
+      } else if (!cached.length || live.date >= cached[cached.length - 1][0]) {
+        merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
+      }
+      renderDaily(merged, "🔴 实时快照 " + live.date + " " + (live.time || ""));
+    });
+  }
 
-  // 只在打开的这一刻取一次快照，不设定时器、不自动刷新。
-  fetchLiveQuote(code, (live) => {
-    if (!live || !(live.close > 0)) {
-      render(cached, cached.length ? "实时行情获取失败，以下是最近一次扫描缓存的数据" : "");
+  function showIntradayTab() {
+    tabDaily.classList.remove("active");
+    tabIntraday.classList.add("active");
+    legendDaily.style.display = "none";
+    legendIntraday.style.display = "";
+    if (intradayData) {
+      subEl.textContent = "今日分时　·　🔴 实时（" + intradayData.points.length + "个数据点）";
+      container.innerHTML = drawIntradaySVG(intradayData.points, intradayData.prevClose);
       return;
     }
-    const liveBar = [live.date, live.open, live.high, live.low, live.close, live.volume];
-    let merged = cached;
-    if (cached.length && cached[cached.length - 1][0] === live.date) {
-      merged = cached.slice(0, -1).concat([liveBar]); // 今天已经有一根缓存的，用实时数据覆盖
-    } else if (!cached.length || live.date >= cached[cached.length - 1][0]) {
-      merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
-    }
-    render(merged, "🔴 实时快照 " + live.date + " " + (live.time || ""));
-  });
+    subEl.textContent = "🔄 正在获取今日分时数据…";
+    container.innerHTML = "";
+    fetchIntradayData(code, (data) => {
+      if (!data || !data.points.length) {
+        subEl.textContent = "今日分时数据获取失败（可能还没开盘，或接口暂时不可用）。";
+        container.innerHTML = '<div class="empty">暂无分时数据。</div>';
+        return;
+      }
+      intradayData = data;
+      subEl.textContent = "今日分时　·　🔴 实时（" + data.points.length + "个数据点）";
+      container.innerHTML = drawIntradaySVG(data.points, data.prevClose);
+    });
+  }
+
+  tabDaily.onclick = showDailyTab;
+  tabIntraday.onclick = showIntradayTab;
+  showDailyTab();
+  document.getElementById("chart-modal").classList.add("open");
 }
 function closeChart() {
   document.getElementById("chart-modal").classList.remove("open");
