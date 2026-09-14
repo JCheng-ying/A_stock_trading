@@ -319,6 +319,47 @@ def get_fundamental_report_data(code: str) -> dict | None:
         return None
 
 
+def get_market_cap_map_via_tencent(codes: list[str], batch_size: int = 80) -> dict[str, float]:
+    """批量查总市值（元），东方财富批量快照连不上时的备用市值来源。
+
+    用的是腾讯的实时行情接口（qt.gtimg.cn，跟网页K线图那个"实时快照"用的是同一个
+    接口），不是东方财富，两边互相独立，一边连不上不影响另一边。这个接口本身支持
+    一次查多只（用逗号分隔的代码列表），按 batch_size 只一批分批请求，避免单次
+    URL 太长。字段格式是 `~` 分隔的一长串，经过实测核对：下标45是总市值（单位"亿
+    元"，比如"3110.77"表示3110.77亿元），跟"股价×总股本"（下标3、73）算出来的结果
+    互相印证过，是准的。
+
+    返回 {code: 总市值(元)}，查不到 / 解析失败的股票不会出现在结果里（调用方按
+    "这只股票的市值未知"处理，不要当成0或者报错）。
+    """
+    result: dict[str, float] = {}
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i : i + batch_size]
+        prefixed = [to_market_prefixed_symbol(c) for c in batch]
+        url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+        try:
+            resp = _retry(lambda: requests.get(url))
+            text = resp.content.decode("gbk", errors="ignore")
+            for code, pfx in zip(batch, prefixed):
+                marker = f'v_{pfx}="'
+                idx = text.find(marker)
+                if idx == -1:
+                    continue
+                parts = text[idx + len(marker):].split("~")
+                if len(parts) < 46:
+                    continue
+                try:
+                    total_cap_yi = float(parts[45])
+                except (ValueError, IndexError):
+                    continue
+                if total_cap_yi > 0:
+                    result[code] = total_cap_yi * 1e8
+        except Exception as e:  # noqa: BLE001
+            _record_error(e, f"get_market_cap_map_via_tencent(batch starting {batch[0]})")
+            continue
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 3. 行业板块实时强度排名
 # ---------------------------------------------------------------------------

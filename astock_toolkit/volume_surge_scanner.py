@@ -62,17 +62,26 @@ _BVPS_CACHE_KEY = "bvps_snapshot_json"
 _BVPS_CACHE_AT_KEY = "bvps_snapshot_at"
 
 
-def get_fundamentals_maps():
+def get_fundamentals_maps(codes: list[str] | None = None):
     """返回 (cap_map, bvps_map, filter_applied, source)。
 
     cap_map: {code: 总市值(元)}；bvps_map: {code: 每股净资产(元) = 股价/市净率}。
-    这两个字段都来自东方财富实时快照（"总市值"、"市净率"），都没有新浪备用数据源。
-    source 说明数据来源：
+    优先来自东方财富实时快照（"总市值"、"市净率"两个字段一起来，都没有新浪备用
+    数据源）。source 说明数据来源：
       - "live"：本次东方财富快照拉取成功，用的是最新数据（顺带已经写回缓存）；
-      - 一个时间字符串：东方财富这次连不上，用的是上次成功缓存的快照，这个时间就是
+      - "live(腾讯逐只兜底)"：东方财富这次连不上，改用腾讯行情接口逐只查市值
+        （见 data_source.get_market_cap_map_via_tencent）顶上——只有市值，没有
+        市净率/净资产近似值，bvps_map 会是空字典。这一档只有传了 codes 参数才会
+        触发，因为腾讯接口是按只查的，不像东方财富一次给全市场，需要知道具体查
+        哪些代码；
+      - 一个时间字符串：以上两个都不行，用的是上次成功缓存的快照，这个时间就是
         那次缓存的时间；
       - None：从来没有成功缓存过，filter_applied=False，两个 map 都是空字典，调用方
         应该跳过对应的过滤条件，而不是把候选全部当成"不满足"过滤掉。
+
+    codes: 东方财富批量快照失败时，腾讯逐只兜底要覆盖的代码列表。传全市场范围
+    （几千只）也能接受，只是要多批几次请求（每批 batch_size 只），实测比"完全不
+    做市值过滤、扫全市场"快得多。
     """
     spot = ds.get_spot_snapshot()
     if not spot.empty and "market_cap" in spot.columns and spot["market_cap"].notna().sum() > 0:
@@ -87,6 +96,13 @@ def get_fundamentals_maps():
         db.set_setting(_BVPS_CACHE_KEY, json.dumps(bvps_map))
         db.set_setting(_BVPS_CACHE_AT_KEY, db.now_str())
         return cap_map, bvps_map, True, "live"
+
+    if codes:
+        tencent_cap_map = ds.get_market_cap_map_via_tencent(codes)
+        if tencent_cap_map:
+            db.set_setting(_MARKET_CAP_CACHE_KEY, json.dumps(tencent_cap_map))
+            db.set_setting(_MARKET_CAP_CACHE_AT_KEY, db.now_str())
+            return tencent_cap_map, {}, True, "live(腾讯逐只兜底)"
 
     cached_cap_json = db.get_setting(_MARKET_CAP_CACHE_KEY)
     cached_at = db.get_setting(_MARKET_CAP_CACHE_AT_KEY)
@@ -116,15 +132,21 @@ def get_market_cap_filtered_universe(max_cap_yi: float = config.MARKET_CAP_MAX_Y
     if universe.empty:
         return universe, False, None
 
-    cap_map, bvps_map, filter_applied, source = get_fundamentals_maps()
+    cap_map, bvps_map, filter_applied, source = get_fundamentals_maps(codes=universe["code"].tolist())
     if not filter_applied:
         return universe, False, None
 
     max_cap_yuan = max_cap_yi * 1e8
-    ok_codes = {
-        c for c, mc in cap_map.items()
-        if mc < max_cap_yuan and bvps_map.get(c, 0) > config.MIN_BOOK_VALUE_PER_SHARE
-    }
+    if bvps_map:
+        ok_codes = {
+            c for c, mc in cap_map.items()
+            if mc < max_cap_yuan and bvps_map.get(c, 0) > config.MIN_BOOK_VALUE_PER_SHARE
+        }
+    else:
+        # 腾讯兜底路径（source == "live(腾讯逐只兜底)"）只有市值，没有市净率数据——
+        # 这一轮先只按市值过滤，净资产那条交给 check_book_value.py 事后用财报真实
+        # 值核对删除，不能因为"这轮没有近似值"就把候选全部当成不满足过滤掉。
+        ok_codes = {c for c, mc in cap_map.items() if mc < max_cap_yuan}
     filtered = universe[universe["code"].isin(ok_codes)].reset_index(drop=True)
     return filtered, True, source
 
