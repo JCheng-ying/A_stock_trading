@@ -135,9 +135,11 @@ def main():
     cap_threshold = config.MAX_MARKET_CAP_TO_H1_REVENUE
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拿最新总市值，核对 总市值/半年营收"
           f"（要求 <= {cap_threshold}）...")
-    cap_map, _bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
+    cap_map, _bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps(codes=codes)
     if not fund_ok:
-        print("    ⚠️ 东方财富连不上也没有市值缓存，本次跳过这条核对。")
+        print("    ⚠️ 东方财富连不上，腾讯兜底也没查到，本次跳过这条核对。")
+    elif fund_source == "live(腾讯逐只兜底)":
+        print("    ⚠️ 东方财富连不上，改用腾讯行情接口逐只查市值兜底。")
     else:
         src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
         print(f"    市值数据来源：{src_desc}。")

@@ -45,7 +45,7 @@ except (AttributeError, ValueError):
     pass
 
 
-def _get_fundamental_filter():
+def _get_fundamental_filter(codes: list[str] | None = None):
     """判断候选股票是否满足两条基本面要求：
       1. 每股净资产 > MIN_BOOK_VALUE_PER_SHARE：优先用 check_book_value.py 查到的
          财报真实值（按季度披露，不会天天变，查过一次就一直有效），查不到时退回
@@ -53,12 +53,17 @@ def _get_fundamental_filter():
       2. 总市值 / 半年营收 <= MAX_MARKET_CAP_TO_H1_REVENUE：半年营收用财报真实值
          缓存（查不到就不做这条过滤——宁可漏判，不能拿不到数据的股票当成一定超标），
          总市值必须是当天实时值（跟净资产不同，市值天天在变，不能只查一次缓存到底）。
-    两者共用同一份东方财富市值快照/缓存，见 volume_surge_scanner.get_fundamentals_maps。
+    两者共用同一份市值数据（东方财富实时快照优先，连不上时按 codes 逐只查腾讯
+    兜底），见 volume_surge_scanner.get_fundamentals_maps。
+
+    codes: 传入候选股票代码列表，东方财富连不上时腾讯兜底就靠这个知道该查哪些——
+    不传的话腾讯兜底不会触发（因为不知道查哪些代码），只会用东方财富实时快照/
+    上次缓存这两档。
 
     返回一个 passes(code)->bool 的判断函数，以及打印用的说明文字。
     """
     book_value_cache = db.get_all_book_value_cache()
-    cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps()
+    cap_map, bvps_map, fund_ok, fund_source = vss.get_fundamentals_maps(codes=codes)
 
     def passes(code):
         cached = book_value_cache.get(code)
@@ -77,10 +82,14 @@ def _get_fundamental_filter():
                 return False
         return True
 
-    if fund_ok:
-        src_desc = "本次实时快照" if fund_source == "live" else f"上次缓存（{fund_source}）"
+    if not fund_ok:
+        src_desc = "无（东方财富连不上，腾讯兜底也没查到，也没有缓存）"
+    elif fund_source == "live":
+        src_desc = "本次东方财富实时快照"
+    elif fund_source == "live(腾讯逐只兜底)":
+        src_desc = "东方财富连不上，腾讯逐只查市值兜底"
     else:
-        src_desc = "无（东方财富连不上也没有缓存）"
+        src_desc = f"上次缓存（{fund_source}）"
     desc = (f"净资产/半年营收财报真实值缓存 {len(book_value_cache)} 只（见 check_book_value.py），"
             f"净资产缺失时退回股价/市净率反推的近似值，市值来源：{src_desc}。要求每股净资产 > "
             f"{config.MIN_BOOK_VALUE_PER_SHARE}元，总市值/半年营收 <= "
@@ -116,16 +125,37 @@ def _tag_board_heat(context: str):
 
 def run_fast(trading_days: int, skip_star_market: bool, workers: int):
     t0 = time.time()
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
-    passes_fundamentals, fund_desc = _get_fundamental_filter()
-    print(f"    {fund_desc}")
-
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取近{trading_days}个交易日涨停股池"
           f"（沪深主板+创业板，快速候选名单）...")
     pool = ds.get_recent_limit_up_candidates(trading_days=trading_days)
     if pool.empty:
         print("❌ 未能获取涨停股池数据（可能是非交易日窗口，或接口暂不可用）。最近内部错误：", ds.LAST_ERROR)
         sys.exit(1)
+
+    star_codes = []
+    if not skip_star_market:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取科创板范围（涨停股池接口不覆盖，单独补上）...")
+        universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
+        star_codes = [c for c in universe.to_dict("records") if str(c["code"]).startswith(("688", "689"))]
+        if len(star_codes) < 100:
+            # 科创板正常有大几百只，个位数/0只基本可以肯定是这一步的请求失败了（比如
+            # 短时间内请求太多被限流），不是真的没有科创板股票——明确报出来，不要悄悄
+            # 当成"科创板这次没有信号"糊弄过去，那样会掩盖真实的失败。
+            print(f"    ⚠️ 科创板范围内只有 {len(star_codes)} 只，明显不正常（正常应有大几百只），"
+                  f"本次跳过科创板扫描。最近内部错误：{ds.LAST_ERROR}")
+            star_codes = []
+        else:
+            print(f"    科创板范围内共 {len(star_codes)} 只。")
+    else:
+        print("    已跳过科创板（--skip-star-market）。")
+
+    # 两边候选名单都拿到之后再统一算基本面过滤——这样东方财富连不上时，腾讯兜底
+    # 才知道该按这些具体代码去查，而不是不知道查哪些、直接放弃兜底。
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
+    all_candidate_codes = list(pool["code"].unique()) + [c["code"] for c in star_codes]
+    passes_fundamentals, fund_desc = _get_fundamental_filter(codes=all_candidate_codes)
+    print(f"    {fund_desc}")
+
     before_n = pool["code"].nunique()
     pool = pool[pool["code"].map(passes_fundamentals)].reset_index(drop=True)
     n_codes = pool["code"].nunique()
@@ -141,30 +171,19 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
     found = bps.scan_recent_limit_up_pool(trading_days=trading_days, progress_cb=_progress, max_workers=workers)
     print(f"    候选名单中命中底部首板信号 {len(found)} 只。")
 
-    if not skip_star_market:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描科创板（涨停股池接口不覆盖，单独补上）...")
-        universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
-        star_codes = [c for c in universe.to_dict("records") if str(c["code"]).startswith(("688", "689"))]
-        if len(star_codes) < 100:
-            # 科创板正常有大几百只，个位数/0只基本可以肯定是这一步的请求失败了（比如
-            # 短时间内请求太多被限流），不是真的没有科创板股票——明确报出来，不要悄悄
-            # 当成"科创板这次没有信号"糊弄过去，那样会掩盖真实的失败。
-            print(f"    ⚠️ 科创板范围内只有 {len(star_codes)} 只，明显不正常（正常应有大几百只），"
-                  f"本次跳过科创板扫描。最近内部错误：{ds.LAST_ERROR}")
-        else:
-            before_star = len(star_codes)
-            star_codes = [c for c in star_codes if passes_fundamentals(c["code"])]
-            print(f"    科创板范围内共 {before_star} 只，基本面过滤后剩 {len(star_codes)} 只。")
+    if star_codes:
+        before_star = len(star_codes)
+        star_codes = [c for c in star_codes if passes_fundamentals(c["code"])]
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 扫描科创板：{before_star} 只，"
+              f"基本面过滤后剩 {len(star_codes)} 只。")
 
-            def _progress_star(i, total):
-                if i % 50 == 0 or i == total:
-                    print(f"    科创板扫描进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
+        def _progress_star(i, total):
+            if i % 50 == 0 or i == total:
+                print(f"    科创板扫描进度 {i}/{total}（已用时 {time.time()-t0:.0f}s）")
 
-            star_found = bps.scan_universe_for_new_setups(star_codes, progress_cb=_progress_star, max_workers=workers)
-            print(f"    科创板命中 {len(star_found)} 只。")
-            found = found + star_found
-    else:
-        print("    已跳过科创板（--skip-star-market）。")
+        star_found = bps.scan_universe_for_new_setups(star_codes, progress_cb=_progress_star, max_workers=workers)
+        print(f"    科创板命中 {len(star_found)} 只。")
+        found = found + star_found
 
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 刷新观察池回调状态（并发 {workers} 进程）...")
     updates = bps.refresh_pullback_signals(max_workers=workers)
@@ -184,10 +203,6 @@ def run_fast(trading_days: int, skip_star_market: bool, workers: int):
 
 def run_full_universe(limit: int | None, workers: int):
     t0 = time.time()
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
-    passes_fundamentals, fund_desc = _get_fundamental_filter()
-    print(f"    {fund_desc}")
-
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 获取选股范围（沪深主板+创业板+科创板，不含北交所）...")
     universe = ds.get_a_share_universe(exclude_st=config.UNIVERSE_EXCLUDE_ST)
     if universe.empty:
@@ -195,6 +210,11 @@ def run_full_universe(limit: int | None, workers: int):
         sys.exit(1)
     codes = universe.to_dict("records")
     before_n = len(codes)
+
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 拉取基本面数据（净资产、半年营收、市值）用于过滤...")
+    passes_fundamentals, fund_desc = _get_fundamental_filter(codes=[c["code"] for c in codes])
+    print(f"    {fund_desc}")
+
     codes = [c for c in codes if passes_fundamentals(c["code"])]
     after_n = len(codes)
     if limit:
