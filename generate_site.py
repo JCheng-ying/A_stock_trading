@@ -199,8 +199,8 @@ function renderTable(container, rows, columns, onRowClick) {
   thead.appendChild(headRow);
   table.appendChild(thead);
   const tbody = el("tbody");
-  rows.forEach(row => {
-    const tr = el("tr", onRowClick ? { class: "clickable", title: "点击查看K线图" } : null);
+  rows.forEach((row, index) => {
+    const tr = el("tr", onRowClick ? { class: "clickable", title: "点击查看K线图（弹窗里滚轮可切换上/下一只）" } : null);
     columns.forEach(c => {
       const val = c.render ? c.render(row) : (row[c.key] == null ? "" : row[c.key]);
       if (val instanceof Node) {
@@ -209,7 +209,7 @@ function renderTable(container, rows, columns, onRowClick) {
         tr.appendChild(text("td", val, c.cls ? { class: c.cls } : null));
       }
     });
-    if (onRowClick) tr.addEventListener("click", () => onRowClick(row));
+    if (onRowClick) tr.addEventListener("click", () => onRowClick(row, rows, index));
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
@@ -437,9 +437,33 @@ function drawIntradaySVG(points, prevClose) {
   return svg;
 }
 
+// 弹窗里滚轮切换上/下一只：_chartRows/_chartIndex 记录"当前是从哪张表格、第几行
+// 点进来的"，滚轮就在这张表格的行范围内前后移动，到头绕回另一端。_chartActiveTab
+// 记住切换股票时应该停留在哪个tab（比如正在看"今日分时"就切下一只也接着看分时，
+// 不会每切一只都跳回日K线）。
+let _chartRows = [];
+let _chartIndex = -1;
+let _chartActiveTab = "daily";
+let _wheelNavLock = false;
+
+function navigateChart(delta) {
+  if (_chartRows.length < 2 || _wheelNavLock) return;
+  _wheelNavLock = true;
+  setTimeout(() => { _wheelNavLock = false; }, 220);
+  let idx = _chartIndex + delta;
+  if (idx < 0) idx = _chartRows.length - 1;
+  if (idx >= _chartRows.length) idx = 0;
+  _chartIndex = idx;
+  const row = _chartRows[idx];
+  openChart(row.code, row.name, row.trigger_date);
+}
+
 function openChart(code, name, triggerDate) {
   const cached = (DATA.price_history || {})[code] || [];
-  document.getElementById("chart-title").textContent = code + "  " + (name || "");
+  const posNote = _chartRows.length > 1
+    ? "　（第" + (_chartIndex + 1) + "/" + _chartRows.length + "只，滚轮切换上/下一只）"
+    : "";
+  document.getElementById("chart-title").textContent = code + "  " + (name || "") + posNote;
   const subEl = document.getElementById("chart-sub");
   const container = document.getElementById("chart-container");
   const tabDaily = document.getElementById("tab-daily");
@@ -459,6 +483,7 @@ function openChart(code, name, triggerDate) {
   }
 
   function showDailyTab() {
+    _chartActiveTab = "daily";
     tabDaily.classList.add("active");
     tabIntraday.classList.remove("active");
     legendDaily.style.display = "";
@@ -482,6 +507,7 @@ function openChart(code, name, triggerDate) {
   }
 
   function showIntradayTab() {
+    _chartActiveTab = "intraday";
     tabDaily.classList.remove("active");
     tabIntraday.classList.add("active");
     legendDaily.style.display = "none";
@@ -507,7 +533,11 @@ function openChart(code, name, triggerDate) {
 
   tabDaily.onclick = showDailyTab;
   tabIntraday.onclick = showIntradayTab;
-  showDailyTab();
+  if (_chartActiveTab === "intraday") {
+    showIntradayTab();
+  } else {
+    showDailyTab();
+  }
   document.getElementById("chart-modal").classList.add("open");
 }
 function closeChart() {
@@ -520,7 +550,16 @@ document.getElementById("chart-modal").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeChart();
 });
-function withChartClick(row) { openChart(row.code, row.name, row.trigger_date); }
+function withChartClick(row, rows, index) {
+  _chartRows = rows || [];
+  _chartIndex = index != null ? index : -1;
+  openChart(row.code, row.name, row.trigger_date);
+}
+document.getElementById("chart-modal").addEventListener("wheel", (e) => {
+  if (!document.getElementById("chart-modal").classList.contains("open")) return;
+  e.preventDefault();
+  navigateChart(e.deltaY > 0 ? 1 : -1);
+}, { passive: false });
 
 document.getElementById("meta").textContent =
   "最后扫描时间：" + (DATA.last_scan_at || "无") + "　·　扫描范围：" + (DATA.universe_count || "无");
