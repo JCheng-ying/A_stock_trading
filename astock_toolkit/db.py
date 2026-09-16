@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS book_value_cache (
     report_period TEXT,         -- 对应报告期，如 '20260630'
     h1_revenue REAL,            -- 最近一期半年报的营业总收入（元），用于算 总市值/半年营收
     h1_revenue_period TEXT,     -- 对应半年报报告期，如 '20260630'（固定是0630结尾）
+    extra_json TEXT,            -- 净利润/毛利率/净利率/ROE/负债率/净利润趋势，JSON字符串
+                                 -- （字段还在增加，用JSON存比每次都加新列灵活）
     fetched_at TEXT
 );
 """
@@ -128,7 +130,7 @@ def _migrate(conn):
         conn.execute(f"DROP TABLE IF EXISTS {old_table}")
 
     bvc_cols = {row[1] for row in conn.execute("PRAGMA table_info(book_value_cache)")}
-    for col, coltype in (("h1_revenue", "REAL"), ("h1_revenue_period", "TEXT")):
+    for col, coltype in (("h1_revenue", "REAL"), ("h1_revenue_period", "TEXT"), ("extra_json", "TEXT")):
         if col not in bvc_cols:
             conn.execute(f"ALTER TABLE book_value_cache ADD COLUMN {col} {coltype}")
 
@@ -314,25 +316,28 @@ def get_book_value_cached(code):
 
 def get_all_book_value_cache():
     """返回 {code: {book_value_per_share, report_period, h1_revenue, h1_revenue_period,
-    fetched_at}}。"""
+    extra_json, fetched_at}}。extra_json 是净利润/毛利率/净利率/ROE/负债率/净利润趋势
+    打包的JSON字符串，调用方自己 json.loads 解析。"""
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM book_value_cache").fetchall()
         return {r["code"]: dict(r) for r in rows}
 
 
 def upsert_book_value(code, book_value_per_share, report_period, h1_revenue=None,
-                       h1_revenue_period=None):
+                       h1_revenue_period=None, extra_json=None):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO book_value_cache (code, book_value_per_share, report_period, "
-            "h1_revenue, h1_revenue_period, fetched_at) "
-            "VALUES (?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
+            "h1_revenue, h1_revenue_period, extra_json, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
             "book_value_per_share=excluded.book_value_per_share, "
             "report_period=excluded.report_period, "
             "h1_revenue=COALESCE(excluded.h1_revenue, book_value_cache.h1_revenue), "
             "h1_revenue_period=COALESCE(excluded.h1_revenue_period, book_value_cache.h1_revenue_period), "
+            "extra_json=COALESCE(excluded.extra_json, book_value_cache.extra_json), "
             "fetched_at=excluded.fetched_at",
-            (code, book_value_per_share, report_period, h1_revenue, h1_revenue_period, now_str()),
+            (code, book_value_per_share, report_period, h1_revenue, h1_revenue_period,
+             extra_json, now_str()),
         )
 
 

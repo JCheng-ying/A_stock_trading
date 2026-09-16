@@ -125,9 +125,19 @@ TEMPLATE = """<!doctype html>
   .quote-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px 10px; align-content: start; }
   .quote-stats .qs { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
   .quote-stats .qs .lbl { color: var(--dim); }
+  .fund-panel {
+    display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px; margin-bottom: 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    font-size: 12.5px;
+  }
+  .fund-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px 10px; align-content: start; }
+  .fund-stats .qs { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
+  .fund-stats .qs .lbl { color: var(--dim); }
+  .fund-trend-title { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
   @media (max-width: 560px) {
     .quote-panel { grid-template-columns: 1fr; }
     .quote-stats { grid-template-columns: repeat(2, 1fr); }
+    .fund-panel { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -168,6 +178,7 @@ TEMPLATE = """<!doctype html>
     <h3 id="chart-title"></h3>
     <div class="modal-sub" id="chart-sub"></div>
     <div id="quote-panel"></div>
+    <div id="fundamentals-panel"></div>
     <div class="chart-tabs">
       <button class="chart-tab active" id="tab-daily">日K线</button>
       <button class="chart-tab" id="tab-intraday">今日分时</button>
@@ -336,6 +347,78 @@ function renderQuotePanel(container, quote, code) {
   stat("总股本", text("span", quote.totalShares ? (quote.totalShares / 1e8).toFixed(2) + "亿" : "－"));
   stat("流通股", text("span", quote.floatShares ? (quote.floatShares / 1e8).toFixed(2) + "亿" : "－"));
   panel.appendChild(statsDiv);
+
+  container.appendChild(panel);
+}
+
+// ---------------------------------------------------------------------------
+// 基本面面板：净资产/净利润/毛利率/净利率/ROE/负债率 + 净利润趋势图。数据来自
+// generate_site.py 打包进 DATA.fundamentals 的本地缓存（check_book_value.py
+// 查财报时存下来的真实值，按季度更新，不是每次生成网页现查，更不会在浏览器里
+// 发请求）。跟"日K线/今日分时"两个tab无关，一直显示。
+// ---------------------------------------------------------------------------
+function drawProfitTrendSVG(trend) {
+  const W = 340, H = 130, padL = 34, padR = 8, padT = 10, padB = 20;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const values = trend.map((t) => t.net_profit / 1e8); // 换算成"亿元"
+  const maxV = Math.max(...values, 0);
+  const minV = Math.min(...values, 0);
+  const range = (maxV - minV) || 1;
+  const y = (v) => padT + plotH - ((v - minV) / range) * plotH;
+  const zeroY = y(0);
+  const n = values.length;
+  const barW = Math.max((plotW / n) * 0.55, 3);
+  const x = (i) => padL + ((i + 0.5) / n) * plotW;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+  svg += `<line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="var(--border)" stroke-width="1"/>`;
+  svg += `<text x="4" y="${y(maxV) + 4}" font-size="9" fill="var(--dim)">${maxV.toFixed(0)}</text>`;
+  svg += `<text x="4" y="${y(minV) + 4}" font-size="9" fill="var(--dim)">${minV.toFixed(0)}</text>`;
+  values.forEach((v, i) => {
+    const cx = x(i);
+    const barTop = y(Math.max(v, 0));
+    const barBot = y(Math.min(v, 0));
+    const color = v >= 0 ? "var(--red)" : "var(--green)"; // A股：盈利红、亏损绿
+    svg += `<rect x="${cx - barW / 2}" y="${barTop}" width="${barW}" height="${Math.max(barBot - barTop, 1)}" fill="${color}"/>`;
+    const p = trend[i].period;
+    const label = p.slice(2, 4) + "." + p.slice(4, 6);
+    svg += `<text x="${cx}" y="${H - 6}" font-size="9" fill="var(--dim)" text-anchor="middle">${label}</text>`;
+  });
+  svg += `</svg>`;
+  return svg;
+}
+
+function renderFundamentalsPanel(container, fund) {
+  container.innerHTML = "";
+  if (!fund) return;
+  const panel = el("div", { class: "fund-panel" });
+
+  const statsDiv = el("div", { class: "fund-stats" });
+  function stat(label, value) {
+    const row = el("div", { class: "qs" });
+    row.appendChild(text("span", label, { class: "lbl" }));
+    row.appendChild(text("span", value));
+    statsDiv.appendChild(row);
+  }
+  stat("每股净资产", fund.book_value_per_share != null ? fund.book_value_per_share.toFixed(2) + "元" : "－");
+  stat("净利润", fund.net_profit != null ? (fund.net_profit / 1e8).toFixed(2) + "亿" : "－");
+  stat("毛利率", fund.gross_margin != null ? fund.gross_margin.toFixed(2) + "%" : "－");
+  stat("净利率", fund.net_margin != null ? fund.net_margin.toFixed(2) + "%" : "－");
+  stat("ROE", fund.roe != null ? fund.roe.toFixed(2) + "%" : "－");
+  stat("负债率", fund.debt_ratio != null ? fund.debt_ratio.toFixed(2) + "%" : "－");
+  panel.appendChild(statsDiv);
+
+  const trendDiv = el("div");
+  const hasTrend = fund.profit_trend && fund.profit_trend.length > 0;
+  trendDiv.appendChild(text("div", "净利润趋势" + (hasTrend ? "（近" + fund.profit_trend.length + "期，亿元）" : ""), { class: "fund-trend-title" }));
+  const trendHost = el("div");
+  if (hasTrend) {
+    trendHost.innerHTML = drawProfitTrendSVG(fund.profit_trend);
+  } else {
+    trendHost.appendChild(el("div", { class: "empty" }, [document.createTextNode("暂无趋势数据。")]));
+  }
+  trendDiv.appendChild(trendHost);
+  panel.appendChild(trendDiv);
 
   container.appendChild(panel);
 }
@@ -601,6 +684,7 @@ function openChart(code, name, triggerDate) {
     ? "　（第" + (_chartIndex + 1) + "/" + _chartRows.length + "只，滚轮切换上/下一只）"
     : "";
   document.getElementById("chart-title").textContent = code + "  " + (name || "") + posNote;
+  renderFundamentalsPanel(document.getElementById("fundamentals-panel"), (DATA.fundamentals || {})[code]);
   const subEl = document.getElementById("chart-sub");
   const container = document.getElementById("chart-container");
   const tabDaily = document.getElementById("tab-daily");
@@ -879,6 +963,28 @@ def build_price_history(codes: set[str]) -> dict:
     return history
 
 
+def build_fundamentals(codes: set[str]) -> dict:
+    """给K线弹窗的基本面面板打包数据：每股净资产/净利润/毛利率/净利率/ROE/负债率/
+    净利润趋势，来自 book_value_cache（check_book_value.py 查财报缓存的，不是
+    每次生成网页时现查——这些数据本来就是"按季度更新，不用每天查"的东西）。
+    """
+    cache = db.get_all_book_value_cache()
+    fundamentals = {}
+    for code in codes:
+        row = cache.get(code)
+        if not row:
+            continue
+        entry = {"book_value_per_share": row.get("book_value_per_share")}
+        if row.get("extra_json"):
+            try:
+                entry.update(json.loads(row["extra_json"]))
+            except (TypeError, ValueError):
+                pass
+        if any(v is not None for v in entry.values()):
+            fundamentals[code] = entry
+    return fundamentals
+
+
 def build_data() -> dict:
     last_scan_at = db.get_setting("last_scan_at") or ""
     universe_count = db.get_setting("last_scan_universe_count") or ""
@@ -898,6 +1004,7 @@ def build_data() -> dict:
         "vs_universe_count": db.get_setting("last_volume_surge_universe_count") or "",
         "volume_surge_signals": volume_surge_signals,
         "price_history": build_price_history(codes),
+        "fundamentals": build_fundamentals(codes),
     }
 
 

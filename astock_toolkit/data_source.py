@@ -267,8 +267,9 @@ def _get_spot_snapshot_uncached() -> pd.DataFrame:
 
 
 def get_fundamental_report_data(code: str) -> dict | None:
-    """查单只股票财报披露的真实"每股净资产"和"半年报营业总收入"（不是股价/市净率
-    反推的近似值、也不是拿年度收入简单除以2估算的）。
+    """查单只股票财报披露的真实基本面数据（不是股价/市净率反推的近似值、也不是
+    拿年度数据简单除以2估算的）：每股净资产、半年报营业总收入、净利润、毛利率、
+    销售净利率、净资产收益率(ROE)、资产负债率，以及最近几期净利润的趋势序列。
 
     用的是 `stock_financial_abstract` 这个按财报科目查询的接口，跟实时快照走的
     是不同的数据源/host，实测在东方财富主快照接口连不上的环境下这个接口仍然可用。
@@ -276,10 +277,17 @@ def get_fundamental_report_data(code: str) -> dict | None:
     不适合每天对全市场做。财报按季度披露，不会天天变，查到后应该缓存起来长期复用
     （见 db.get_book_value_cached / check_book_value.py），不需要每天重新查。
 
-    返回 {"book_value_per_share": float或None, "report_period": "20260630"或None,
-    "h1_revenue": float或None, "h1_revenue_period": "20260630"或None（固定是0630
-    结尾的半年报报告期，不是"最新一期"——最新一期可能是季报，不是半年报）}，
-    整张表都查不到时返回 None。
+    返回字典，取不到的字段是 None，整张表都查不到时返回 None：
+      - book_value_per_share, report_period：每股净资产及其报告期（最新一期，
+        不管是不是半年报）
+      - h1_revenue, h1_revenue_period：半年报（报告期固定是"0630"结尾）营业总收入，
+        不是"最新一期"——最新一期可能是季报
+      - net_profit, gross_margin, net_margin, roe, debt_ratio：最新一期的净利润
+        （元）、毛利率(%)、销售净利率(%)、净资产收益率(%)、资产负债率(%)，都取
+        "常用指标"那个分类下的版本（同一指标在"盈利能力"等分类下可能重复出现，
+        统一取"常用指标"的，避免不同分类里数值口径不一致）
+      - profit_trend：最近几期净利润趋势，[{"period": "20260630", "net_profit":
+        float}, ...] 按报告期从早到晚排列，用于画趋势图
     """
     try:
         df = _retry(lambda: ak.stock_financial_abstract(code))
@@ -288,18 +296,29 @@ def get_fundamental_report_data(code: str) -> dict | None:
         date_cols = [c for c in df.columns if c not in ("选项", "指标")]
         if not date_cols:
             return None
+        latest_col = date_cols[0]  # 按报告期倒序排列，第一列就是最新一期
 
-        result = {"book_value_per_share": None, "report_period": None,
-                   "h1_revenue": None, "h1_revenue_period": None}
+        def latest_value(option, indicator):
+            row = df[(df["选项"] == option) & (df["指标"] == indicator)]
+            if row.empty:
+                return None
+            val = row[latest_col].values[0]
+            return None if pd.isna(val) else float(val)
 
-        bvps_row = df[df["指标"] == "每股净资产"]
-        if not bvps_row.empty:
-            # 第2列往后按报告期倒序排列，取最新一期（不管是不是半年报）。
-            latest_col = date_cols[0]
-            val = bvps_row[latest_col].values[0]
-            if not pd.isna(val):
-                result["book_value_per_share"] = float(val)
-                result["report_period"] = str(latest_col)
+        result = {
+            "book_value_per_share": latest_value("常用指标", "每股净资产"),
+            "report_period": None,
+            "h1_revenue": None,
+            "h1_revenue_period": None,
+            "net_profit": latest_value("常用指标", "净利润"),
+            "gross_margin": latest_value("常用指标", "毛利率"),
+            "net_margin": latest_value("常用指标", "销售净利率"),
+            "roe": latest_value("常用指标", "净资产收益率(ROE)"),
+            "debt_ratio": latest_value("常用指标", "资产负债率"),
+            "profit_trend": None,
+        }
+        if result["book_value_per_share"] is not None:
+            result["report_period"] = str(latest_col)
 
         revenue_row = df[df["指标"] == "营业总收入"]
         if not revenue_row.empty:
@@ -311,7 +330,18 @@ def get_fundamental_report_data(code: str) -> dict | None:
                     result["h1_revenue"] = float(val)
                     result["h1_revenue_period"] = str(latest_h1)
 
-        if result["book_value_per_share"] is None and result["h1_revenue"] is None:
+        profit_row = df[(df["选项"] == "常用指标") & (df["指标"] == "净利润")]
+        if not profit_row.empty:
+            trend = []
+            for col in date_cols[:8]:  # 最近8期，倒序（最新在前）
+                val = profit_row[col].values[0]
+                if not pd.isna(val):
+                    trend.append({"period": str(col), "net_profit": float(val)})
+            trend.reverse()  # 画图要从早到晚，左到右
+            if trend:
+                result["profit_trend"] = trend
+
+        if all(v is None for k, v in result.items() if k not in ("report_period", "h1_revenue_period")):
             return None
         return result
     except Exception as e:  # noqa: BLE001

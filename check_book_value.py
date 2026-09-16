@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime
@@ -43,8 +44,11 @@ def _fetch_one_fundamental(code: str) -> dict | None:
     result = ds.get_fundamental_report_data(code)
     if result is None:
         return None
+    extra = {k: result.get(k) for k in
+             ("net_profit", "gross_margin", "net_margin", "roe", "debt_ratio", "profit_trend")}
+    extra_json = json.dumps(extra, ensure_ascii=False) if any(v is not None for v in extra.values()) else None
     db.upsert_book_value(code, result["book_value_per_share"], result["report_period"],
-                          result["h1_revenue"], result["h1_revenue_period"])
+                          result["h1_revenue"], result["h1_revenue_period"], extra_json)
     return {"code": code, **result}
 
 
@@ -66,16 +70,18 @@ def main():
     if args.force:
         to_fetch = codes
     else:
-        # 缓存里两个指标都有值才算真的查到过；只要有一个还是空的（比如上次接口被限流、
-        # 请求没成功），默认也会重新查一遍——不用加 --force，下次自动补上。
+        # 缓存里几个指标都有值才算真的查到过；只要有一个还是空的（比如上次接口被
+        # 限流、请求没成功，或者是新加的字段旧缓存里还没有），默认也会重新查一遍
+        # ——不用加 --force，下次自动补上。
         to_fetch = [
             c for c in codes
             if c not in cached
             or cached[c]["book_value_per_share"] is None
             or cached[c]["h1_revenue"] is None
+            or cached[c]["extra_json"] is None
         ]
     print(f"    已有缓存 {len(cached)} 只，本次需要查询 {len(to_fetch)} 只"
-          f"（{'已加 --force，全部重查' if args.force else '跳过两个指标都已查到的，这是默认行为'}）。")
+          f"（{'已加 --force，全部重查' if args.force else '跳过所有指标都已查到的，这是默认行为'}）。")
 
     if to_fetch:
         def _progress(i, total):
