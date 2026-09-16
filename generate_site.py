@@ -113,6 +113,22 @@ TEMPLATE = """<!doctype html>
     border-radius: 6px; padding: 4px 12px; font-size: 12.5px; cursor: pointer;
   }
   .chart-tab.active { color: var(--accent); border-color: var(--accent); }
+  .quote-panel {
+    display: grid; grid-template-columns: 1fr 1.3fr; gap: 12px; margin-bottom: 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    font-size: 12.5px;
+  }
+  .quote-book table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .quote-book td { padding: 1px 4px; white-space: nowrap; }
+  .quote-book td.lbl { color: var(--dim); }
+  .quote-book td.vol { color: var(--dim); text-align: right; }
+  .quote-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px 10px; align-content: start; }
+  .quote-stats .qs { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
+  .quote-stats .qs .lbl { color: var(--dim); }
+  @media (max-width: 560px) {
+    .quote-panel { grid-template-columns: 1fr; }
+    .quote-stats { grid-template-columns: repeat(2, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -151,6 +167,7 @@ TEMPLATE = """<!doctype html>
     <button class="modal-close" id="chart-modal-close">✕</button>
     <h3 id="chart-title"></h3>
     <div class="modal-sub" id="chart-sub"></div>
+    <div id="quote-panel"></div>
     <div class="chart-tabs">
       <button class="chart-tab active" id="tab-daily">日K线</button>
       <button class="chart-tab" id="tab-intraday">今日分时</button>
@@ -229,6 +246,98 @@ function pctCell(v) {
   const span = el("span", { class: n >= 0 ? "pct-pos" : "pct-neg" });
   span.textContent = (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
   return span;
+}
+
+// ---------------------------------------------------------------------------
+// 五档买卖盘 + 实时行情统计面板：完全复用 fetchLiveQuote 已经拿到的那份数据
+// （日K线"实时快照"本来就在取这个接口），不会额外发请求。涨停/跌停价是按公开
+// 的涨跌幅限制规则客户端算的（主板/中小板±10%，创业板300xxx/科创板688xxx
+// ±20%），四舍五入到分——跟真实撮合的取整规则可能有个别分钱的误差，仅供参考。
+// ---------------------------------------------------------------------------
+function limitPctForCode(code) {
+  return /^(300|301|688|689)/.test(code) ? 0.20 : 0.10;
+}
+function fmtNum(v, digits) {
+  return (v == null || isNaN(v)) ? "－" : v.toFixed(digits == null ? 2 : digits);
+}
+function pctSpan(v, digits) {
+  if (v == null || isNaN(v)) return text("span", "－");
+  const span = el("span", { class: v >= 0 ? "pct-pos" : "pct-neg" });
+  span.textContent = (v >= 0 ? "+" : "") + v.toFixed(digits == null ? 2 : digits) + "%";
+  return span;
+}
+function renderQuotePanel(container, quote, code) {
+  if (!quote) { container.innerHTML = ""; return; }
+  container.innerHTML = "";
+  const panel = el("div", { class: "quote-panel" });
+
+  // 左边：五档买卖盘（卖五在最上面，买五在最下面，跟真实交易软件的排法一致）；
+  // 价格按A股习惯上色：高于昨收红、低于昨收绿。
+  const bookDiv = el("div", { class: "quote-book" });
+  const bookTable = el("table");
+  const bookBody = el("tbody");
+  function priceCell(price) {
+    if (price == null || isNaN(price)) return text("td", "－");
+    const cls = quote.prevClose ? (price >= quote.prevClose ? "pct-pos" : "pct-neg") : "";
+    return el("td", cls ? { class: cls } : null, [document.createTextNode(price.toFixed(2))]);
+  }
+  quote.asks.slice().reverse().forEach((lv, i) => {
+    const rank = 5 - i;
+    const tr = el("tr");
+    tr.appendChild(text("td", "卖" + rank, { class: "lbl" }));
+    tr.appendChild(priceCell(lv.price));
+    tr.appendChild(text("td", lv.vol ? String(lv.vol) : "－", { class: "vol" }));
+    bookBody.appendChild(tr);
+  });
+  quote.bids.forEach((lv, i) => {
+    const tr = el("tr");
+    tr.appendChild(text("td", "买" + (i + 1), { class: "lbl" }));
+    tr.appendChild(priceCell(lv.price));
+    tr.appendChild(text("td", lv.vol ? String(lv.vol) : "－", { class: "vol" }));
+    bookBody.appendChild(tr);
+  });
+  bookTable.appendChild(bookBody);
+  bookDiv.appendChild(bookTable);
+  panel.appendChild(bookDiv);
+
+  // 右边：统计信息网格
+  const limitPct = limitPctForCode(code);
+  const limitUp = quote.prevClose ? Math.round(quote.prevClose * (1 + limitPct) * 100) / 100 : null;
+  const limitDown = quote.prevClose ? Math.round(quote.prevClose * (1 - limitPct) * 100) / 100 : null;
+  const weiBi = (quote.totalBidVol + quote.totalAskVol) > 0
+    ? (quote.totalBidVol - quote.totalAskVol) / (quote.totalBidVol + quote.totalAskVol) * 100 : null;
+  const weiCha = quote.totalBidVol - quote.totalAskVol;
+  const statsDiv = el("div", { class: "quote-stats" });
+  function stat(label, valueNode) {
+    const row = el("div", { class: "qs" });
+    row.appendChild(text("span", label, { class: "lbl" }));
+    row.appendChild(valueNode instanceof Node ? valueNode : text("span", valueNode));
+    statsDiv.appendChild(row);
+  }
+  stat("现价", el("span", { class: quote.prevClose && quote.close >= quote.prevClose ? "pct-pos" : "pct-neg" }, [document.createTextNode(fmtNum(quote.close))]));
+  stat("涨幅", pctSpan(quote.pctChg));
+  stat("今开", text("span", fmtNum(quote.open)));
+  stat("昨收", text("span", fmtNum(quote.prevClose)));
+  stat("最高", text("span", fmtNum(quote.high)));
+  stat("最低", text("span", fmtNum(quote.low)));
+  stat("涨停", text("span", fmtNum(limitUp)));
+  stat("跌停", text("span", fmtNum(limitDown)));
+  stat("换手", text("span", fmtNum(quote.turnoverRate) + "%"));
+  stat("总手", text("span", quote.volume ? (quote.volume / 100).toFixed(0) : "－"));
+  stat("金额", text("span", quote.amountWan ? (quote.amountWan / 10000).toFixed(2) + "亿" : "－"));
+  stat("委比", text("span", weiBi == null ? "－" : weiBi.toFixed(1) + "%"));
+  stat("委差", text("span", weiCha == null ? "－" : String(weiCha)));
+  stat("外盘", text("span", quote.waiPan ? String(quote.waiPan) : "－"));
+  stat("内盘", text("span", quote.neiPan ? String(quote.neiPan) : "－"));
+  stat("市盈率", text("span", fmtNum(quote.pe, 2)));
+  stat("市净率", text("span", fmtNum(quote.pb, 2)));
+  stat("总市值", text("span", quote.totalCapYi ? quote.totalCapYi.toFixed(2) + "亿" : "－"));
+  stat("流通值", text("span", quote.floatCapYi ? quote.floatCapYi.toFixed(2) + "亿" : "－"));
+  stat("总股本", text("span", quote.totalShares ? (quote.totalShares / 1e8).toFixed(2) + "亿" : "－"));
+  stat("流通股", text("span", quote.floatShares ? (quote.floatShares / 1e8).toFixed(2) + "亿" : "－"));
+  panel.appendChild(statsDiv);
+
+  container.appendChild(panel);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,15 +448,43 @@ function fetchLiveQuote(code, cb) {
       // 股票名称那个字段是GBK编码，fetch按UTF-8解码会花掉，但我们不需要那个字段，
       // 后面用到的都是纯数字字段，"~"分隔符本身是ASCII，不受编码影响，不用管它。
       const parts = raw.slice(idx + marker.length).split("~");
-      if (parts.length < 35) { finish(null); return; }
+      if (parts.length < 47) { finish(null); return; }
       const close = parseFloat(parts[3]);
       const ts = parts[30] || "";
       if (!(close > 0) || ts.length < 14) { finish(null); return; }
+      const prevClose = parseFloat(parts[4]);
+      // 买一~买五 / 卖一~卖五：价格和"手数"两两一组，下标9开始。
+      const book = (startIdx) => {
+        const levels = [];
+        for (let i = 0; i < 5; i++) {
+          const p = parseFloat(parts[startIdx + i * 2]);
+          const v = parseFloat(parts[startIdx + i * 2 + 1]);
+          levels.push({ price: p, vol: v });
+        }
+        return levels;
+      };
+      const bids = book(9);
+      const asks = book(19);
+      const totalBidVol = bids.reduce((s, l) => s + (l.vol || 0), 0);
+      const totalAskVol = asks.reduce((s, l) => s + (l.vol || 0), 0);
       finish({
         open: parseFloat(parts[5]), high: parseFloat(parts[33]), low: parseFloat(parts[34]),
         close, volume: parseFloat(parts[6]) * 100, // 腾讯这里是"手"，*100换算成"股"跟历史缓存对齐
         date: ts.slice(0, 4) + "-" + ts.slice(4, 6) + "-" + ts.slice(6, 8),
         time: ts.slice(8, 10) + ":" + ts.slice(10, 12) + ":" + ts.slice(12, 14),
+        prevClose,
+        pctChg: parseFloat(parts[32]),
+        turnoverRate: parseFloat(parts[38]),
+        pe: parseFloat(parts[39]),
+        pb: parseFloat(parts[46]),
+        floatCapYi: parseFloat(parts[44]),
+        totalCapYi: parseFloat(parts[45]),
+        amountWan: parseFloat(parts[37]),
+        floatShares: parseFloat(parts[72]),
+        totalShares: parseFloat(parts[73]),
+        waiPan: parseFloat(parts[7]), // 外盘：累计"以卖一价及以上成交"的量，主动买盘
+        neiPan: parseFloat(parts[8]), // 内盘：累计"以买一价及以下成交"的量，主动卖盘
+        bids, asks, totalBidVol, totalAskVol, // 这两个是当前5档挂单量，只用来算委比/委差，不是外盘/内盘
       });
     })
     .catch(() => { clearTimeout(timer); finish(null); });
@@ -489,6 +626,7 @@ function openChart(code, name, triggerDate) {
     legendDaily.style.display = "";
     legendIntraday.style.display = "none";
     renderDaily(cached, "🔄 正在获取实时行情…");
+    renderQuotePanel(document.getElementById("quote-panel"), null, code);
     // 只在打开的这一刻取一次快照，不设定时器、不自动刷新。
     fetchLiveQuote(code, (live) => {
       if (!live || !(live.close > 0)) {
@@ -503,6 +641,7 @@ function openChart(code, name, triggerDate) {
         merged = cached.concat([liveBar]); // 缓存里还没有今天，追加一根
       }
       renderDaily(merged, "🔴 实时快照 " + live.date + " " + (live.time || ""));
+      renderQuotePanel(document.getElementById("quote-panel"), live, code);
     });
   }
 
@@ -512,6 +651,7 @@ function openChart(code, name, triggerDate) {
     tabIntraday.classList.add("active");
     legendDaily.style.display = "none";
     legendIntraday.style.display = "";
+    renderQuotePanel(document.getElementById("quote-panel"), null, code); // 分时tab不显示盘口面板
     if (intradayData) {
       subEl.textContent = "今日分时　·　🔴 实时（" + intradayData.points.length + "个数据点）";
       container.innerHTML = drawIntradaySVG(intradayData.points, intradayData.prevClose);
