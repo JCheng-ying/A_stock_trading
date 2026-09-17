@@ -791,9 +791,21 @@ function withChartClick(row, rows, index) {
   openChart(row.code, row.name, row.trigger_date);
 }
 document.getElementById("chart-modal").addEventListener("wheel", (e) => {
-  if (!document.getElementById("chart-modal").classList.contains("open")) return;
+  const modal = document.getElementById("chart-modal");
+  if (!modal.classList.contains("open")) return;
+  const box = modal.querySelector(".modal-box");
+  if (!box) return;
+  // 弹窗内容比弹窗高的时候（比如两栏布局在窄屏下堆叠成很长一条），要先让滚轮
+  // 正常滚动弹窗内部内容；只有已经滚到顶/滚到底了，继续往那个方向滚才切换股票
+  // ——不然内容比弹窗高的图表根本没法完整看到，一滚就直接跳到下一只了。
+  const atTop = box.scrollTop <= 0;
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 1;
+  const scrollingDown = e.deltaY > 0;
+  if ((scrollingDown && !atBottom) || (!scrollingDown && !atTop)) {
+    return;
+  }
   e.preventDefault();
-  navigateChart(e.deltaY > 0 ? 1 : -1);
+  navigateChart(scrollingDown ? 1 : -1);
 }, { passive: false });
 
 document.getElementById("meta").textContent =
