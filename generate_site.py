@@ -96,7 +96,14 @@ TEMPLATE = """<!doctype html>
   .modal-overlay.open { display: flex; }
   .modal-box {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 20px; max-width: 820px; width: 100%; max-height: 90vh; overflow-y: auto;
+    padding: 20px; max-width: 1060px; width: 100%; max-height: 90vh; overflow-y: auto;
+  }
+  .modal-columns { display: flex; gap: 16px; align-items: flex-start; }
+  .modal-left { flex: 0 0 380px; min-width: 0; }
+  .modal-right { flex: 1 1 auto; min-width: 0; }
+  @media (max-width: 860px) {
+    .modal-columns { flex-direction: column; }
+    .modal-left { flex: none; width: 100%; }
   }
   .modal-box h3 { margin: 0 0 4px; font-size: 17px; }
   .modal-box .modal-sub { color: var(--dim); font-size: 12.5px; margin-bottom: 14px; }
@@ -114,7 +121,7 @@ TEMPLATE = """<!doctype html>
   }
   .chart-tab.active { color: var(--accent); border-color: var(--accent); }
   .quote-panel {
-    display: grid; grid-template-columns: 1fr 1.3fr; gap: 12px; margin-bottom: 14px;
+    display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
     font-size: 12.5px;
   }
@@ -122,11 +129,11 @@ TEMPLATE = """<!doctype html>
   .quote-book td { padding: 1px 4px; white-space: nowrap; }
   .quote-book td.lbl { color: var(--dim); }
   .quote-book td.vol { color: var(--dim); text-align: right; }
-  .quote-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px 10px; align-content: start; }
+  .quote-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px 10px; align-content: start; }
   .quote-stats .qs { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
   .quote-stats .qs .lbl { color: var(--dim); }
   .fund-panel {
-    display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px; margin-bottom: 14px;
+    display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
     font-size: 12.5px;
   }
@@ -134,10 +141,8 @@ TEMPLATE = """<!doctype html>
   .fund-stats .qs { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
   .fund-stats .qs .lbl { color: var(--dim); }
   .fund-trend-title { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
-  @media (max-width: 560px) {
-    .quote-panel { grid-template-columns: 1fr; }
-    .quote-stats { grid-template-columns: repeat(2, 1fr); }
-    .fund-panel { grid-template-columns: 1fr; }
+  @media (max-width: 380px) {
+    .quote-stats, .fund-stats { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -177,22 +182,28 @@ TEMPLATE = """<!doctype html>
     <button class="modal-close" id="chart-modal-close">✕</button>
     <h3 id="chart-title"></h3>
     <div class="modal-sub" id="chart-sub"></div>
-    <div id="quote-panel"></div>
-    <div id="fundamentals-panel"></div>
-    <div class="chart-tabs">
-      <button class="chart-tab active" id="tab-daily">日K线</button>
-      <button class="chart-tab" id="tab-intraday">今日分时</button>
-    </div>
-    <div id="chart-container"></div>
-    <div class="chart-legend" id="chart-legend-daily">
-      <span><span class="dot" style="background:var(--red)"></span>收盘价高于开盘价（阳线）</span>
-      <span><span class="dot" style="background:var(--green)"></span>收盘价低于开盘价（阴线）</span>
-      <span><span class="dot" style="background:var(--accent)"></span>信号触发日</span>
-    </div>
-    <div class="chart-legend" id="chart-legend-intraday" style="display:none">
-      <span><span class="dot" style="background:var(--red)"></span>现价高于昨收</span>
-      <span><span class="dot" style="background:var(--green)"></span>现价低于昨收</span>
-      <span><span class="dot" style="background:var(--dim)"></span>昨收参考线</span>
+    <div class="modal-columns">
+      <div class="modal-left">
+        <div id="quote-panel"></div>
+        <div id="fundamentals-panel"></div>
+      </div>
+      <div class="modal-right">
+        <div class="chart-tabs">
+          <button class="chart-tab active" id="tab-daily">日K线</button>
+          <button class="chart-tab" id="tab-intraday">今日分时</button>
+        </div>
+        <div id="chart-container"></div>
+        <div class="chart-legend" id="chart-legend-daily">
+          <span><span class="dot" style="background:var(--red)"></span>收盘价高于开盘价（阳线）</span>
+          <span><span class="dot" style="background:var(--green)"></span>收盘价低于开盘价（阴线）</span>
+          <span><span class="dot" style="background:var(--accent)"></span>信号触发日</span>
+        </div>
+        <div class="chart-legend" id="chart-legend-intraday" style="display:none">
+          <span><span class="dot" style="background:var(--red)"></span>现价高于昨收</span>
+          <span><span class="dot" style="background:var(--green)"></span>现价低于昨收</span>
+          <span><span class="dot" style="background:var(--dim)"></span>昨收参考线</span>
+        </div>
+      </div>
     </div>
   </div>
 </div>
