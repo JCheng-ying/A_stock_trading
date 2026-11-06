@@ -14,9 +14,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from astock_toolkit import config, db
+from astock_toolkit import config, data_source as ds, db
 
 OUT_PATH = "index.html"
 
@@ -72,6 +73,8 @@ TEMPLATE = """<!doctype html>
     display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
   }
   .badge.watching { background: #1f6feb33; color: var(--accent); }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--accent, #58a6ff); }
   .badge.buy_signal { background: #3fb95033; color: var(--green); }
   .badge.expired { background: #8b949e33; color: var(--dim); }
   select {
@@ -162,7 +165,6 @@ TEMPLATE = """<!doctype html>
   <div id="new-table"></div>
 
   <h2>🎯 重点关注：回调至买点区间</h2>
-  <div class="meta" id="macd-meta"></div>
   <div id="buy-table"></div>
 
   <h2>📋 完整信号记录</h2>
@@ -224,36 +226,80 @@ function el(tag, attrs, children) {
 }
 function text(tag, s, attrs) { return el(tag, attrs, [document.createTextNode(s == null ? "" : s)]); }
 
+// 表格渲染 + 点表头排序：第一次点某列 = 由高到低，再点同一列 = 由低到高；点"代码"
+// 这列恢复原始顺序。空值永远排在最后。onRowClick 收到的 rows 是当前排序后的数组，
+// 所以弹窗里滚轮切换上/下一只，顺序跟表格眼前看到的一致。
+// 列的排序值：优先用 c.sort(row)，没有就用 row[c.key]；两个都没有的列点不动。
 function renderTable(container, rows, columns, onRowClick) {
   container.innerHTML = "";
   if (!rows || rows.length === 0) {
     container.appendChild(el("div", { class: "empty" }, [document.createTextNode("暂无数据。")]));
     return;
   }
+  const sortValue = (c, row) => c.sort ? c.sort(row) : (c.key ? row[c.key] : null);
+  const isSortable = c => !!(c.sort || c.key);
+  let sortCol = null, sortDir = "desc";
   const scroll = el("div", { class: "table-scroll" });
   const table = el("table");
   const thead = el("thead");
   const headRow = el("tr");
-  columns.forEach(c => headRow.appendChild(text("th", c.label, c.cls ? { class: c.cls } : null)));
+  const ths = columns.map(c => {
+    const attrs = {};
+    if (c.cls) attrs.class = c.cls;
+    const th = text("th", c.label, attrs);
+    if (isSortable(c)) {
+      th.classList.add("sortable");
+      th.title = c.key === "code" ? "点击恢复原始顺序" : "点击排序（第一次由高到低，再点反过来）";
+      th.addEventListener("click", () => {
+        if (c.key === "code") { sortCol = null; }
+        else if (sortCol === c) { sortDir = sortDir === "desc" ? "asc" : "desc"; }
+        else { sortCol = c; sortDir = "desc"; }
+        draw();
+      });
+    }
+    headRow.appendChild(th);
+    return th;
+  });
   thead.appendChild(headRow);
   table.appendChild(thead);
   const tbody = el("tbody");
-  rows.forEach((row, index) => {
-    const tr = el("tr", onRowClick ? { class: "clickable", title: "点击查看K线图（弹窗里滚轮可切换上/下一只）" } : null);
-    columns.forEach(c => {
-      const val = c.render ? c.render(row) : (row[c.key] == null ? "" : row[c.key]);
-      if (val instanceof Node) {
-        tr.appendChild(el("td", c.cls ? { class: c.cls } : null, [val]));
-      } else {
-        tr.appendChild(text("td", val, c.cls ? { class: c.cls } : null));
-      }
-    });
-    if (onRowClick) tr.addEventListener("click", () => onRowClick(row, rows, index));
-    tbody.appendChild(tr);
-  });
   table.appendChild(tbody);
   scroll.appendChild(table);
   container.appendChild(scroll);
+
+  function draw() {
+    let view = rows;
+    if (sortCol) {
+      const dir = sortDir === "desc" ? -1 : 1;
+      const isEmpty = v => v == null || v === "" || (typeof v === "number" && isNaN(v));
+      view = rows.slice().sort((a, b) => {
+        const va = sortValue(sortCol, a), vb = sortValue(sortCol, b);
+        if (isEmpty(va) && isEmpty(vb)) return 0;
+        if (isEmpty(va)) return 1;
+        if (isEmpty(vb)) return -1;
+        if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+        return String(va).localeCompare(String(vb)) * dir;
+      });
+    }
+    ths.forEach((th, i) => {
+      th.textContent = columns[i].label + (columns[i] === sortCol ? (sortDir === "desc" ? " ▼" : " ▲") : "");
+    });
+    tbody.innerHTML = "";
+    view.forEach((row, index) => {
+      const tr = el("tr", onRowClick ? { class: "clickable", title: "点击查看K线图（弹窗里滚轮可切换上/下一只）" } : null);
+      columns.forEach(c => {
+        const val = c.render ? c.render(row) : (row[c.key] == null ? "" : row[c.key]);
+        if (val instanceof Node) {
+          tr.appendChild(el("td", c.cls ? { class: c.cls } : null, [val]));
+        } else {
+          tr.appendChild(text("td", val, c.cls ? { class: c.cls } : null));
+        }
+      });
+      if (onRowClick) tr.addEventListener("click", () => onRowClick(row, view, index));
+      tbody.appendChild(tr);
+    });
+  }
+  draw();
 }
 
 function statusBadge(status) {
@@ -825,13 +871,10 @@ const stats = document.getElementById("stats");
 
 renderTable(document.getElementById("board-table"), DATA.board_ranking, [
   { key: "board", label: "板块" },
-  { label: "涨跌幅", render: r => pctCell(r.pct_chg) },
+  { label: "涨跌幅", render: r => pctCell(r.pct_chg), sort: r => r.pct_chg },
   { key: "group", label: "关注分组" },
   { key: "leader_name", label: "领涨股" },
 ]);
-
-document.getElementById("macd-meta").textContent =
-  "MACD确认：近" + DATA.macd_lookback_days + "个交易日内出现过金叉，且金叉后DIF-DEA持续向上发散——只是额外标注，不影响是否进入这个列表。";
 
 function macdCell(row) {
   if (row.macd_confirmed === 1 || row.macd_confirmed === true) return "✅ 确认";
@@ -846,27 +889,39 @@ const signalColumns = [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "board", label: "板块" },
-  { label: "板块涨跌幅", render: r => pctCell(r.board_pct_chg) },
+  { label: "板块涨跌幅", render: r => pctCell(r.board_pct_chg), sort: r => r.board_pct_chg },
   { label: "首板日", key: "trigger_date" },
-  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
-  { label: "状态", render: r => statusBadge(r.status) },
-  { label: "MACD确认", render: macdCell },
+  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "", sort: r => r.trigger_price },
+  { label: "状态", render: r => statusBadge(r.status), sort: r => r.status },
+  { label: "MACD确认", render: macdCell, sort: r => r.macd_confirmed == null ? null : Number(r.macd_confirmed) },
   { label: "备注", key: "note", cls: "note" },
 ];
 renderTable(document.getElementById("new-table"), newSignals, signalColumns, withChartClick);
 
 const buySignals = DATA.signals.filter(s => s.status === "buy_signal");
+function peCell(row) {
+  if (row.pe == null) return "－";
+  return row.pe <= 0 ? "亏损" : Number(row.pe).toFixed(1);
+}
+function hotRankCell(row) {
+  if (row.hot_rank_change == null) return "－";
+  const n = row.hot_rank_change;
+  const span = el("span", { class: n > 0 ? "pct-pos" : (n < 0 ? "pct-neg" : "") },
+    [document.createTextNode(n > 0 ? "↑" + n : (n < 0 ? "↓" + (-n) : "持平"))]);
+  span.title = "今日第" + row.hot_rank + "名（前一日第" + row.hot_rank_prev + "名）";
+  return span;
+}
 renderTable(document.getElementById("buy-table"), buySignals, [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "board", label: "板块" },
-  { label: "板块涨跌幅", render: r => pctCell(r.board_pct_chg) },
   { label: "首板日", key: "trigger_date" },
-  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
-  { label: "涨停后高点", render: r => r.post_high != null ? Number(r.post_high).toFixed(2) : "" },
-  { label: "MACD确认", render: macdCell },
-  { label: "MACD说明", key: "macd_note", cls: "note" },
-  { label: "备注", key: "note", cls: "note" },
+  { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "", sort: r => r.trigger_price },
+  { label: "距涨停最高价涨幅", render: r => pctCell(r.gain_from_limit_high), sort: r => r.gain_from_limit_high },
+  { label: "市盈率", render: peCell, sort: r => (r.pe == null || r.pe <= 0) ? null : r.pe },
+  { label: "换手率", render: r => r.turnover_rate != null ? Number(r.turnover_rate).toFixed(2) + "%" : "", sort: r => r.turnover_rate },
+  { label: "东财热度提高名次", render: hotRankCell, sort: r => r.hot_rank_change },
+  { label: "MACD确认", render: macdCell, sort: r => r.macd_confirmed == null ? null : Number(r.macd_confirmed) },
 ], withChartClick);
 
 const filterSel = document.getElementById("status-filter");
@@ -888,10 +943,10 @@ renderTable(document.getElementById("vs-table"), DATA.volume_surge_signals, [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "trigger_date", label: "触发日" },
-  { label: "触发价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "" },
-  { label: "前30日均换手", render: r => r.avg_turnover_30d != null ? Number(r.avg_turnover_30d).toFixed(2) + "%" : "" },
-  { label: "当日换手", render: r => r.today_turnover != null ? Number(r.today_turnover).toFixed(2) + "%" : "" },
-  { label: "前30日均价", render: r => r.avg_price_30d != null ? Number(r.avg_price_30d).toFixed(2) : "" },
+  { label: "触发价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "", sort: r => r.trigger_price },
+  { label: "前30日均换手", render: r => r.avg_turnover_30d != null ? Number(r.avg_turnover_30d).toFixed(2) + "%" : "", sort: r => r.avg_turnover_30d },
+  { label: "当日换手", render: r => r.today_turnover != null ? Number(r.today_turnover).toFixed(2) + "%" : "", sort: r => r.today_turnover },
+  { label: "前30日均价", render: r => r.avg_price_30d != null ? Number(r.avg_price_30d).toFixed(2) : "", sort: r => r.avg_price_30d },
   { label: "备注", key: "note", cls: "note" },
 ], withChartClick);
 
@@ -935,6 +990,11 @@ const pool1CsvColumns = [
   { label: "备注", value: r => r.note },
   { label: "新增时间", value: r => r.added_at },
   { label: "更新时间", value: r => r.updated_at },
+  { label: "距涨停最高价涨幅(%)", value: r => r.gain_from_limit_high },
+  { label: "市盈率", value: r => r.pe },
+  { label: "换手率(%)", value: r => r.turnover_rate },
+  { label: "东财热度排名", value: r => r.hot_rank },
+  { label: "东财热度提高名次", value: r => r.hot_rank_change },
 ];
 const pool2CsvColumns = [
   { label: "代码", value: r => r.code },
@@ -1008,12 +1068,48 @@ def build_fundamentals(codes: set[str]) -> dict:
     return fundamentals
 
 
+def enrich_buy_signals(signals: list[dict]) -> None:
+    """给"回调至买点区间"的信号补四个当日指标（直接写进信号字典，随网页一起打包）：
+      - gain_from_limit_high: 最新收盘价相对"首板涨停日最高价"的涨幅(%)，负数=比涨停日最高价低；
+        用本地 price_cache 算，不发网络请求。
+      - turnover_rate: 最新交易日换手率(%)，同样来自 price_cache。
+      - pe: 市盈率，腾讯实时行情接口批量查一次。
+      - hot_rank / hot_rank_change: 东方财富人气榜最新排名、比前一交易日提高的名次
+        （正数=排名提高）。每只股票单独查一次，用线程池并发（纯 HTTP，没有 V8 的问题）。
+    任何一项查不到都只是留空，不影响网页生成。
+    """
+    buy = [s for s in signals if s.get("status") == "buy_signal"]
+    if not buy:
+        return
+    for s in buy:
+        rows = db.get_cached_history(s["code"])
+        if not rows:
+            continue
+        last = rows[-1]
+        limit_day = next((r for r in rows if r["date"] == s["trigger_date"]), None)
+        if limit_day and limit_day.get("high") and last.get("close"):
+            s["gain_from_limit_high"] = round((last["close"] / limit_day["high"] - 1) * 100, 2)
+        s["turnover_rate"] = last.get("turnover_rate")
+    codes = sorted({s["code"] for s in buy})
+    pe_map = ds.get_pe_map_via_tencent(codes)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        hot_map = dict(zip(codes, ex.map(ds.get_hot_rank_change, codes)))
+    for s in buy:
+        s["pe"] = pe_map.get(s["code"])
+        hot = hot_map.get(s["code"])
+        if hot:
+            s["hot_rank"] = hot["rank"]
+            s["hot_rank_prev"] = hot["prev_rank"]
+            s["hot_rank_change"] = hot["change"]
+
+
 def build_data() -> dict:
     last_scan_at = db.get_setting("last_scan_at") or ""
     universe_count = db.get_setting("last_scan_universe_count") or ""
     ranking_json = db.get_setting("last_board_ranking_json")
     board_ranking = json.loads(ranking_json) if ranking_json else []
     signals = db.list_watchlist()
+    enrich_buy_signals(signals)
     volume_surge_signals = db.list_volume_surge()
     codes = {r["code"] for r in signals} | {r["code"] for r in volume_surge_signals}
     return {

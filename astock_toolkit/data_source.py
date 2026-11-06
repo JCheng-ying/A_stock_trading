@@ -390,6 +390,65 @@ def get_market_cap_map_via_tencent(codes: list[str], batch_size: int = 80) -> di
     return result
 
 
+def get_pe_map_via_tencent(codes: list[str], batch_size: int = 80) -> dict[str, float]:
+    """批量查市盈率（腾讯实时行情接口下标39，跟 get_market_cap_map_via_tencent 同一个
+    接口、同样的解析方式）。返回 {code: 市盈率}，查不到 / 接口返回空（比如亏损股没有
+    市盈率）的股票不会出现在结果里；亏损股如果接口给了负数就原样返回，由调用方决定怎么显示。
+    """
+    result: dict[str, float] = {}
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i : i + batch_size]
+        prefixed = [to_market_prefixed_symbol(c) for c in batch]
+        url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+        try:
+            resp = _retry(lambda: requests.get(url))
+            text = resp.content.decode("gbk", errors="ignore")
+            for code, pfx in zip(batch, prefixed):
+                marker = f'v_{pfx}="'
+                idx = text.find(marker)
+                if idx == -1:
+                    continue
+                parts = text[idx + len(marker):].split("~")
+                if len(parts) < 40:
+                    continue
+                try:
+                    result[code] = float(parts[39])
+                except (ValueError, IndexError):
+                    continue
+        except Exception as e:  # noqa: BLE001
+            _record_error(e, f"get_pe_map_via_tencent(batch starting {batch[0]})")
+            continue
+    return result
+
+
+def get_hot_rank_change(code: str) -> dict | None:
+    """东方财富个股人气榜（"热度"）排名变化：最近一个交易日的排名 vs 前一个交易日。
+
+    直接调东方财富 app 端的 `stockrank/getHisList` 接口（akshare 的
+    stock_hot_rank_detail_em 底层用的就是它，但 akshare 那层偶尔会卡住不返回，
+    这里自己带超时调更稳）。返回 {rank, prev_rank, change, date, prev_date}，
+    change = prev_rank - rank：正数=排名往前提高了N名（热度上升），负数=下降。
+    查不到返回 None。
+    """
+    prefixed = to_market_prefixed_symbol(code).upper()
+    try:
+        resp = _retry(lambda: requests.post(
+            "https://emappdata.eastmoney.com/stockrank/getHisList",
+            json={"appId": "appId01", "globalId": "786e4c21-70dc-435a-93bb-38",
+                  "marketType": "", "srcSecurityCode": prefixed},
+            timeout=10))
+        data = resp.json().get("data") or []
+        if len(data) < 2:
+            return None
+        prev, last = data[-2], data[-1]
+        return {"rank": last["rank"], "prev_rank": prev["rank"],
+                "change": prev["rank"] - last["rank"],
+                "date": last["calcTime"], "prev_date": prev["calcTime"]}
+    except Exception as e:  # noqa: BLE001
+        _record_error(e, f"get_hot_rank_change({code})")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # 3. 行业板块实时强度排名
 # ---------------------------------------------------------------------------
