@@ -71,7 +71,7 @@
   `stockrank/getHisList`（akshare 的 `stock_hot_rank_detail_em` 底层同一个接口，但
   akshare 那层会卡住不返回，所以自己带超时调）。
 
-"🆕 本次扫描新增"表也用同样的四列（替换掉原来的"备注"），外加一列**当日涨跌幅**
+"🆕 本次扫描新增"表也用同样的四列（替换掉原来的"备注"）；两张表都有一列**当日涨跌幅**
 （最近两个收盘价算的）。
 
 这四项在 `generate_site.py` 的 `enrich_buy_signals()` 里补，每次生成网页时查一次，

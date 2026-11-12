@@ -930,6 +930,7 @@ renderTable(document.getElementById("buy-table"), buySignals, [
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "", sort: r => r.trigger_price },
   ...indicatorColumns,
+  todayPctColumn,
   { label: "MACD确认", render: macdCell, sort: r => r.macd_confirmed == null ? null : Number(r.macd_confirmed) },
 ], withChartClick);
 
