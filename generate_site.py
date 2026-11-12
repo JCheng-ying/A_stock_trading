@@ -882,6 +882,26 @@ function macdCell(row) {
   return "－";
 }
 
+function peCell(row) {
+  if (row.pe == null) return "－";
+  return row.pe <= 0 ? "亏损" : Number(row.pe).toFixed(1);
+}
+function hotRankCell(row) {
+  if (row.hot_rank_change == null) return "－";
+  const n = row.hot_rank_change;
+  const span = el("span", { class: n > 0 ? "pct-pos" : (n < 0 ? "pct-neg" : "") },
+    [document.createTextNode(n > 0 ? "↑" + n : (n < 0 ? "↓" + (-n) : "持平"))]);
+  span.title = "今日第" + row.hot_rank + "名（前一日第" + row.hot_rank_prev + "名）";
+  return span;
+}
+const indicatorColumns = [
+  { label: "距涨停最高价涨幅", render: r => pctCell(r.gain_from_limit_high), sort: r => r.gain_from_limit_high },
+  { label: "市盈率", render: peCell, sort: r => (r.pe == null || r.pe <= 0) ? null : r.pe },
+  { label: "换手率", render: r => r.turnover_rate != null ? Number(r.turnover_rate).toFixed(2) + "%" : "", sort: r => r.turnover_rate },
+  { label: "东财热度提高名次", render: hotRankCell, sort: r => r.hot_rank_change },
+];
+const todayPctColumn = { label: "当日涨跌幅", render: r => pctCell(r.pct_chg), sort: r => r.pct_chg };
+
 const scanDate = (DATA.last_scan_at || "").slice(0, 10);
 document.getElementById("new-heading").textContent = "🆕 本次扫描新增（" + scanDate + "）";
 const newSignals = DATA.signals.filter(s => (s.added_at || "").slice(0, 10) === scanDate);
@@ -896,31 +916,20 @@ const signalColumns = [
   { label: "MACD确认", render: macdCell, sort: r => r.macd_confirmed == null ? null : Number(r.macd_confirmed) },
   { label: "备注", key: "note", cls: "note" },
 ];
-renderTable(document.getElementById("new-table"), newSignals, signalColumns, withChartClick);
+// "本次扫描新增"表：跟完整信号记录共用同一套列，只是把最后的"备注"换成跟"重点关注"
+// 一样的四个当日指标，再加一个当日涨跌幅。
+const newSignalColumns = signalColumns.filter(c => c.label !== "备注")
+  .concat(indicatorColumns, [todayPctColumn]);
+renderTable(document.getElementById("new-table"), newSignals, newSignalColumns, withChartClick);
 
 const buySignals = DATA.signals.filter(s => s.status === "buy_signal");
-function peCell(row) {
-  if (row.pe == null) return "－";
-  return row.pe <= 0 ? "亏损" : Number(row.pe).toFixed(1);
-}
-function hotRankCell(row) {
-  if (row.hot_rank_change == null) return "－";
-  const n = row.hot_rank_change;
-  const span = el("span", { class: n > 0 ? "pct-pos" : (n < 0 ? "pct-neg" : "") },
-    [document.createTextNode(n > 0 ? "↑" + n : (n < 0 ? "↓" + (-n) : "持平"))]);
-  span.title = "今日第" + row.hot_rank + "名（前一日第" + row.hot_rank_prev + "名）";
-  return span;
-}
 renderTable(document.getElementById("buy-table"), buySignals, [
   { key: "code", label: "代码" },
   { key: "name", label: "名称" },
   { key: "board", label: "板块" },
   { label: "首板日", key: "trigger_date" },
   { label: "首板价", render: r => r.trigger_price != null ? Number(r.trigger_price).toFixed(2) : "", sort: r => r.trigger_price },
-  { label: "距涨停最高价涨幅", render: r => pctCell(r.gain_from_limit_high), sort: r => r.gain_from_limit_high },
-  { label: "市盈率", render: peCell, sort: r => (r.pe == null || r.pe <= 0) ? null : r.pe },
-  { label: "换手率", render: r => r.turnover_rate != null ? Number(r.turnover_rate).toFixed(2) + "%" : "", sort: r => r.turnover_rate },
-  { label: "东财热度提高名次", render: hotRankCell, sort: r => r.hot_rank_change },
+  ...indicatorColumns,
   { label: "MACD确认", render: macdCell, sort: r => r.macd_confirmed == null ? null : Number(r.macd_confirmed) },
 ], withChartClick);
 
@@ -993,6 +1002,7 @@ const pool1CsvColumns = [
   { label: "距涨停最高价涨幅(%)", value: r => r.gain_from_limit_high },
   { label: "市盈率", value: r => r.pe },
   { label: "换手率(%)", value: r => r.turnover_rate },
+  { label: "当日涨跌幅(%)", value: r => r.pct_chg },
   { label: "东财热度排名", value: r => r.hot_rank },
   { label: "东财热度提高名次", value: r => r.hot_rank_change },
 ];
@@ -1068,8 +1078,10 @@ def build_fundamentals(codes: set[str]) -> dict:
     return fundamentals
 
 
-def enrich_buy_signals(signals: list[dict]) -> None:
-    """给"回调至买点区间"的信号补四个当日指标（直接写进信号字典，随网页一起打包）：
+def enrich_buy_signals(signals: list[dict], scan_date: str = "") -> None:
+    """给"回调至买点区间"的信号、以及"本次扫描新增"的信号（added_at 日期 == scan_date）
+    补五个当日指标（直接写进信号字典，随网页一起打包）：
+      - pct_chg: 最新交易日涨跌幅(%)，用 price_cache 最近两个收盘价算。
       - gain_from_limit_high: 最新收盘价相对"首板涨停日最高价"的涨幅(%)，负数=比涨停日最高价低；
         用本地 price_cache 算，不发网络请求。
       - turnover_rate: 最新交易日换手率(%)，同样来自 price_cache。
@@ -1078,7 +1090,9 @@ def enrich_buy_signals(signals: list[dict]) -> None:
         （正数=排名提高）。每只股票单独查一次，用线程池并发（纯 HTTP，没有 V8 的问题）。
     任何一项查不到都只是留空，不影响网页生成。
     """
-    buy = [s for s in signals if s.get("status") == "buy_signal"]
+    buy = [s for s in signals
+           if s.get("status") == "buy_signal"
+           or (scan_date and (s.get("added_at") or "")[:10] == scan_date)]
     if not buy:
         return
     for s in buy:
@@ -1090,6 +1104,10 @@ def enrich_buy_signals(signals: list[dict]) -> None:
         if limit_day and limit_day.get("high") and last.get("close"):
             s["gain_from_limit_high"] = round((last["close"] / limit_day["high"] - 1) * 100, 2)
         s["turnover_rate"] = last.get("turnover_rate")
+        # 不直接用缓存里的 pct_chg 列（增量缓存拼接处那一天可能是空值），用最近两个
+        # 收盘价自己算，保证有值。
+        if len(rows) >= 2 and rows[-2].get("close") and last.get("close"):
+            s["pct_chg"] = round((last["close"] / rows[-2]["close"] - 1) * 100, 2)
     codes = sorted({s["code"] for s in buy})
     pe_map = ds.get_pe_map_via_tencent(codes)
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -1109,7 +1127,7 @@ def build_data() -> dict:
     ranking_json = db.get_setting("last_board_ranking_json")
     board_ranking = json.loads(ranking_json) if ranking_json else []
     signals = db.list_watchlist()
-    enrich_buy_signals(signals)
+    enrich_buy_signals(signals, last_scan_at[:10])
     volume_surge_signals = db.list_volume_surge()
     codes = {r["code"] for r in signals} | {r["code"] for r in volume_surge_signals}
     return {
